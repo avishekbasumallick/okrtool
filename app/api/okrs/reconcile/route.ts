@@ -3,11 +3,11 @@ import type { AiUpdate } from "@/lib/types";
 import { reconcileWithGemini } from "@/lib/gemini-reconcile";
 import { rowToActiveOKR, type OkrRow } from "@/lib/okr-mappers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { requireUserId } from "@/lib/user-id";
+import { requireAuthUserId } from "@/lib/auth-user";
 
 export async function POST(request: Request) {
   try {
-    const userId = requireUserId(request);
+    const userId = await requireAuthUserId(request);
     if (userId instanceof NextResponse) {
       return userId;
     }

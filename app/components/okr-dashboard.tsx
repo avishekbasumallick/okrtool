@@ -1,9 +1,10 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import type { Session } from "@supabase/supabase-js";
 import type { ActiveOKR, AiUpdate, AppState, CompletedOKR, Priority } from "@/lib/types";
+import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 
-const USER_KEY = "okr_tool_user_id_v1";
 const PRIORITY_OPTIONS: Priority[] = ["P1", "P2", "P3", "P4", "P5"];
 
 const EMPTY_STATE: AppState = {
@@ -16,29 +17,21 @@ function priorityWeight(priority: Priority) {
   return PRIORITY_OPTIONS.indexOf(priority);
 }
 
-function getOrCreateUserId() {
-  const existing = window.localStorage.getItem(USER_KEY);
-  if (existing) {
-    return existing;
-  }
-
-  const generated = crypto.randomUUID();
-  window.localStorage.setItem(USER_KEY, generated);
-  return generated;
+function usernameToEmail(username: string) {
+  return `${username.toLowerCase()}@okrtool.local`;
 }
 
-async function apiFetch<T>(userId: string, input: string, init?: RequestInit): Promise<T> {
+async function apiFetch<T>(accessToken: string, input: string, init?: RequestInit): Promise<T> {
   const response = await fetch(input, {
     ...init,
     headers: {
       "Content-Type": "application/json",
-      "x-user-id": userId,
+      Authorization: `Bearer ${accessToken}`,
       ...(init?.headers ?? {})
     }
   });
 
   const payload = (await response.json()) as T & { error?: string };
-
   if (!response.ok) {
     throw new Error(payload.error ?? "Request failed.");
   }
@@ -54,10 +47,17 @@ export default function OKRDashboard() {
   const [isReconciling, setIsReconciling] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [userId, setUserId] = useState<string | null>(null);
 
-  const loadState = async (resolvedUserId: string) => {
-    const payload = await apiFetch<{ active: ActiveOKR[]; archived: CompletedOKR[] }>(resolvedUserId, "/api/okrs", {
+  const [session, setSession] = useState<Session | null>(null);
+  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
+  const [usernameInput, setUsernameInput] = useState("");
+  const [passwordInput, setPasswordInput] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+
+  const getSupabase = () => getSupabaseBrowserClient();
+
+  const loadState = async (accessToken: string) => {
+    const payload = await apiFetch<{ active: ActiveOKR[]; archived: CompletedOKR[] }>(accessToken, "/api/okrs", {
       method: "GET"
     });
 
@@ -70,21 +70,40 @@ export default function OKRDashboard() {
   };
 
   useEffect(() => {
-    const initialize = async () => {
-      const resolvedUserId = getOrCreateUserId();
-      setUserId(resolvedUserId);
+    const supabase = getSupabase();
 
-      try {
-        await loadState(resolvedUserId);
-        setErrorMessage(null);
-      } catch (error) {
-        setErrorMessage(error instanceof Error ? error.message : "Failed to load OKRs.");
-      } finally {
-        setIsLoading(false);
+    const initialize = async () => {
+      const { data, error } = await supabase.auth.getSession();
+      if (error) {
+        setErrorMessage(error.message);
       }
+
+      const currentSession = data.session ?? null;
+      setSession(currentSession);
+
+      if (currentSession?.access_token) {
+        try {
+          await loadState(currentSession.access_token);
+        } catch (loadError) {
+          setErrorMessage(loadError instanceof Error ? loadError.message : "Failed to load OKRs.");
+        }
+      }
+
+      setIsLoading(false);
     };
 
+    const { data: listener } = supabase.auth.onAuthStateChange((_, nextSession) => {
+      setSession(nextSession);
+      if (!nextSession) {
+        setState(EMPTY_STATE);
+      }
+    });
+
     void initialize();
+
+    return () => {
+      listener.subscription.unsubscribe();
+    };
   }, []);
 
   const activeSorted = useMemo(() => {
@@ -97,15 +116,88 @@ export default function OKRDashboard() {
     });
   }, [state.active]);
 
+  const onAuthenticate = async (event: FormEvent) => {
+    event.preventDefault();
+    const username = usernameInput.trim();
+    const password = passwordInput;
+
+    if (!username || !password) {
+      setErrorMessage("Username and password are required.");
+      return;
+    }
+
+    setAuthBusy(true);
+    setErrorMessage(null);
+
+    const supabase = getSupabase();
+    const email = usernameToEmail(username);
+
+    try {
+      if (authMode === "signup") {
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: {
+              username
+            }
+          }
+        });
+
+        if (error) {
+          throw error;
+        }
+
+        // If email confirmations are enabled, session can be null after signup.
+        const ensuredSession = data.session ?? (await supabase.auth.signInWithPassword({ email, password })).data.session;
+        if (!ensuredSession) {
+          throw new Error("Signup succeeded. Confirm email in Supabase settings or disable email confirmation for immediate login.");
+        }
+
+        setSession(ensuredSession);
+        await loadState(ensuredSession.access_token);
+      } else {
+        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) {
+          throw error;
+        }
+
+        if (!data.session) {
+          throw new Error("Login failed: no session returned.");
+        }
+
+        setSession(data.session);
+        await loadState(data.session.access_token);
+      }
+
+      setUsernameInput("");
+      setPasswordInput("");
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Authentication failed.");
+    } finally {
+      setAuthBusy(false);
+      setIsLoading(false);
+    }
+  };
+
+  const onLogout = async () => {
+    const supabase = getSupabase();
+    await supabase.auth.signOut();
+    setSession(null);
+    setState(EMPTY_STATE);
+  };
+
   const onCreateOKR = async (event: FormEvent) => {
     event.preventDefault();
     const cleanTitle = titleInput.trim();
-    if (!cleanTitle || !userId) {
+    const accessToken = session?.access_token;
+
+    if (!cleanTitle || !accessToken) {
       return;
     }
 
     try {
-      const payload = await apiFetch<{ okr: ActiveOKR }>(userId, "/api/okrs", {
+      const payload = await apiFetch<{ okr: ActiveOKR }>(accessToken, "/api/okrs", {
         method: "POST",
         body: JSON.stringify({
           title: cleanTitle,
@@ -128,7 +220,8 @@ export default function OKRDashboard() {
   };
 
   const onUpdateOKR = async (id: string, patch: Partial<ActiveOKR>) => {
-    if (!userId) {
+    const accessToken = session?.access_token;
+    if (!accessToken) {
       return;
     }
 
@@ -149,7 +242,7 @@ export default function OKRDashboard() {
     }));
 
     try {
-      const payload = await apiFetch<{ okr: ActiveOKR }>(userId, `/api/okrs/${id}`, {
+      const payload = await apiFetch<{ okr: ActiveOKR }>(accessToken, `/api/okrs/${id}`, {
         method: "PATCH",
         body: JSON.stringify(patch)
       });
@@ -162,15 +255,16 @@ export default function OKRDashboard() {
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Failed to update OKR.");
       try {
-        await loadState(userId);
+        await loadState(accessToken);
       } catch {
-        // no-op: keep optimistic state and surface existing error
+        // no-op
       }
     }
   };
 
   const onDeleteOKR = async (okr: ActiveOKR) => {
-    if (!userId) {
+    const accessToken = session?.access_token;
+    if (!accessToken) {
       return;
     }
 
@@ -194,7 +288,7 @@ export default function OKRDashboard() {
     }
 
     try {
-      await apiFetch<{ id: string }>(userId, `/api/okrs/${okr.id}`, { method: "DELETE" });
+      await apiFetch<{ id: string }>(accessToken, `/api/okrs/${okr.id}`, { method: "DELETE" });
       setErrorMessage(null);
     } catch (error) {
       setState(previous);
@@ -203,7 +297,8 @@ export default function OKRDashboard() {
   };
 
   const onCompleteOKR = async (okr: ActiveOKR) => {
-    if (!userId) {
+    const accessToken = session?.access_token;
+    if (!accessToken) {
       return;
     }
 
@@ -213,7 +308,7 @@ export default function OKRDashboard() {
     }
 
     try {
-      const payload = await apiFetch<{ okr: CompletedOKR }>(userId, `/api/okrs/${okr.id}/complete`, {
+      const payload = await apiFetch<{ okr: CompletedOKR }>(accessToken, `/api/okrs/${okr.id}/complete`, {
         method: "POST",
         body: JSON.stringify({})
       });
@@ -236,7 +331,8 @@ export default function OKRDashboard() {
   };
 
   const onRunReconcile = async () => {
-    if (!state.active.length || !userId) {
+    const accessToken = session?.access_token;
+    if (!state.active.length || !accessToken) {
       setErrorMessage("No active OKRs available for recategorization.");
       return;
     }
@@ -252,7 +348,7 @@ export default function OKRDashboard() {
     setIsReconciling(true);
 
     try {
-      const payload = await apiFetch<{ updates: AiUpdate[] }>(userId, "/api/okrs/reconcile", {
+      const payload = await apiFetch<{ updates: AiUpdate[] }>(accessToken, "/api/okrs/reconcile", {
         method: "POST",
         body: JSON.stringify({})
       });
@@ -286,6 +382,8 @@ export default function OKRDashboard() {
     }
   };
 
+  const isLoggedIn = Boolean(session?.access_token);
+
   return (
     <main className="page-shell">
       <section className="hero">
@@ -293,156 +391,211 @@ export default function OKRDashboard() {
         <p>Create work items, batch your edits, then use Gemini to recategorize, reprioritize, and recalculate dates.</p>
       </section>
 
-      <section className="card">
-        <h2>Create Work Item</h2>
-        <form onSubmit={onCreateOKR} className="grid-form">
-          <label>
-            Work item title
-            <input
-              required
-              value={titleInput}
-              onChange={(event) => setTitleInput(event.target.value)}
-              placeholder="Example: Improve activation funnel"
-            />
-          </label>
+      {!isLoggedIn ? (
+        <section className="card">
+          <h2>{authMode === "login" ? "Login" : "Sign Up"}</h2>
+          <form onSubmit={onAuthenticate} className="grid-form">
+            <label>
+              Username
+              <input
+                required
+                value={usernameInput}
+                onChange={(event) => setUsernameInput(event.target.value)}
+                placeholder="Enter username"
+              />
+            </label>
 
-          <label>
-            Notes (optional)
-            <textarea
-              value={notesInput}
-              onChange={(event) => setNotesInput(event.target.value)}
-              placeholder="Any details to guide scope/deadline generation"
-            />
-          </label>
+            <label>
+              Password
+              <input
+                required
+                type="password"
+                value={passwordInput}
+                onChange={(event) => setPasswordInput(event.target.value)}
+                placeholder="Enter password"
+              />
+            </label>
 
-          <button type="submit" disabled={!userId || isLoading}>Create OKR</button>
-        </form>
-      </section>
+            <button type="submit" disabled={authBusy}>
+              {authBusy ? "Please wait..." : authMode === "login" ? "Login" : "Sign Up"}
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setAuthMode(authMode === "login" ? "signup" : "login")}
+            >
+              Switch to {authMode === "login" ? "Sign Up" : "Login"}
+            </button>
+          </form>
+        </section>
+      ) : (
+        <section className="card">
+          <div className="section-head">
+            <h2>Session</h2>
+            <button type="button" className="secondary" onClick={() => void onLogout()}>
+              Logout
+            </button>
+          </div>
+          <p className="muted">Logged in user: {session?.user?.email ?? "unknown"}</p>
+        </section>
+      )}
 
-      <section className="card">
-        <div className="section-head">
-          <h2>Active OKRs</h2>
-          <button type="button" onClick={onRunReconcile} disabled={isReconciling || isLoading || !userId}>
-            {isReconciling ? "Running Gemini..." : "Run Recategorization/Reprioritization"}
-          </button>
-        </div>
+      {isLoggedIn ? (
+        <>
+          <section className="card">
+            <h2>Create Work Item</h2>
+            <form onSubmit={onCreateOKR} className="grid-form">
+              <label>
+                Work item title
+                <input
+                  required
+                  value={titleInput}
+                  onChange={(event) => setTitleInput(event.target.value)}
+                  placeholder="Example: Improve activation funnel"
+                />
+              </label>
 
-        {isLoading ? <p className="muted">Loading OKRs...</p> : null}
+              <label>
+                Notes (optional)
+                <textarea
+                  value={notesInput}
+                  onChange={(event) => setNotesInput(event.target.value)}
+                  placeholder="Any details to guide scope/deadline generation"
+                />
+              </label>
 
-        {state.pendingAiRefresh ? (
-          <p className="pending-message">
-            You have pending OKR changes. Confirm recategorization/reprioritization when ready to save LLM calls.
-          </p>
-        ) : null}
+              <button type="submit" disabled={isLoading}>Create OKR</button>
+            </form>
+          </section>
 
-        {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
+          <section className="card">
+            <div className="section-head">
+              <h2>Active OKRs</h2>
+              <button type="button" onClick={onRunReconcile} disabled={isReconciling || isLoading}>
+                {isReconciling ? "Running Gemini..." : "Run Recategorization/Reprioritization"}
+              </button>
+            </div>
 
-        {!isLoading && !activeSorted.length ? <p className="muted">No active OKRs yet.</p> : null}
+            {isLoading ? <p className="muted">Loading OKRs...</p> : null}
 
-        <div className="okr-list">
-          {activeSorted.map((okr) => {
-            const isEditing = editingId === okr.id;
-            return (
-              <article className="okr-item" key={okr.id}>
-                <div className="okr-top-row">
-                  <h3>{okr.title}</h3>
-                  <div className="tag-row">
-                    <span className="tag">{okr.priority}</span>
-                    <span className="tag">{okr.category}</span>
-                  </div>
-                </div>
-
-                <p className="scope">{okr.scope}</p>
-                <p className="meta">
-                  Deadline: <strong>{okr.deadline}</strong>
-                </p>
-
-                {okr.notes ? <p className="meta">Notes: {okr.notes}</p> : null}
-
-                {isEditing ? (
-                  <div className="edit-grid">
-                    <label>
-                      Scope
-                      <textarea
-                        value={okr.scope}
-                        onChange={(event) => {
-                          void onUpdateOKR(okr.id, { scope: event.target.value });
-                        }}
-                      />
-                    </label>
-
-                    <label>
-                      Deadline
-                      <input
-                        type="date"
-                        value={okr.deadline}
-                        onChange={(event) => {
-                          void onUpdateOKR(okr.id, { deadline: event.target.value });
-                        }}
-                      />
-                    </label>
-
-                    <label>
-                      Category
-                      <input
-                        value={okr.category}
-                        onChange={(event) => {
-                          void onUpdateOKR(okr.id, { category: event.target.value });
-                        }}
-                      />
-                    </label>
-
-                    <label>
-                      Priority
-                      <select
-                        value={okr.priority}
-                        onChange={(event) => {
-                          void onUpdateOKR(okr.id, { priority: event.target.value as Priority });
-                        }}
-                      >
-                        {PRIORITY_OPTIONS.map((priority) => (
-                          <option key={priority} value={priority}>
-                            {priority}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
-                ) : null}
-
-                <div className="action-row">
-                  <button type="button" onClick={() => setEditingId(isEditing ? null : okr.id)}>
-                    {isEditing ? "Close Edit" : "Edit"}
-                  </button>
-                  <button type="button" className="secondary" onClick={() => void onCompleteOKR(okr)}>
-                    Mark Complete
-                  </button>
-                  <button type="button" className="danger" onClick={() => void onDeleteOKR(okr)}>
-                    Delete
-                  </button>
-                </div>
-              </article>
-            );
-          })}
-        </div>
-      </section>
-
-      <section className="card">
-        <h2>Archived OKRs</h2>
-        {!state.archived.length ? <p className="muted">No archived OKRs yet.</p> : null}
-
-        <div className="archive-list">
-          {state.archived.map((okr) => (
-            <article className="archive-item" key={okr.id}>
-              <h3>{okr.title}</h3>
-              <p className="meta">Completed: {new Date(okr.completedAt).toLocaleString()}</p>
-              <p className="meta">
-                Date variance: {okr.expectedVsActualDays} day(s) {okr.expectedVsActualDays > 0 ? "late" : "early/on-time"}
+            {state.pendingAiRefresh ? (
+              <p className="pending-message">
+                You have pending OKR changes. Confirm recategorization/reprioritization when ready to save LLM calls.
               </p>
-            </article>
-          ))}
-        </div>
-      </section>
+            ) : null}
+
+            {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
+
+            {!isLoading && !activeSorted.length ? <p className="muted">No active OKRs yet.</p> : null}
+
+            <div className="okr-list">
+              {activeSorted.map((okr) => {
+                const isEditing = editingId === okr.id;
+                return (
+                  <article className="okr-item" key={okr.id}>
+                    <div className="okr-top-row">
+                      <h3>{okr.title}</h3>
+                      <div className="tag-row">
+                        <span className="tag">{okr.priority}</span>
+                        <span className="tag">{okr.category}</span>
+                      </div>
+                    </div>
+
+                    <p className="scope">{okr.scope}</p>
+                    <p className="meta">
+                      Deadline: <strong>{okr.deadline}</strong>
+                    </p>
+
+                    {okr.notes ? <p className="meta">Notes: {okr.notes}</p> : null}
+
+                    {isEditing ? (
+                      <div className="edit-grid">
+                        <label>
+                          Scope
+                          <textarea
+                            value={okr.scope}
+                            onChange={(event) => {
+                              void onUpdateOKR(okr.id, { scope: event.target.value });
+                            }}
+                          />
+                        </label>
+
+                        <label>
+                          Deadline
+                          <input
+                            type="date"
+                            value={okr.deadline}
+                            onChange={(event) => {
+                              void onUpdateOKR(okr.id, { deadline: event.target.value });
+                            }}
+                          />
+                        </label>
+
+                        <label>
+                          Category
+                          <input
+                            value={okr.category}
+                            onChange={(event) => {
+                              void onUpdateOKR(okr.id, { category: event.target.value });
+                            }}
+                          />
+                        </label>
+
+                        <label>
+                          Priority
+                          <select
+                            value={okr.priority}
+                            onChange={(event) => {
+                              void onUpdateOKR(okr.id, { priority: event.target.value as Priority });
+                            }}
+                          >
+                            {PRIORITY_OPTIONS.map((priority) => (
+                              <option key={priority} value={priority}>
+                                {priority}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                    ) : null}
+
+                    <div className="action-row">
+                      <button type="button" onClick={() => setEditingId(isEditing ? null : okr.id)}>
+                        {isEditing ? "Close Edit" : "Edit"}
+                      </button>
+                      <button type="button" className="secondary" onClick={() => void onCompleteOKR(okr)}>
+                        Mark Complete
+                      </button>
+                      <button type="button" className="danger" onClick={() => void onDeleteOKR(okr)}>
+                        Delete
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="card">
+            <h2>Archived OKRs</h2>
+            {!state.archived.length ? <p className="muted">No archived OKRs yet.</p> : null}
+
+            <div className="archive-list">
+              {state.archived.map((okr) => (
+                <article className="archive-item" key={okr.id}>
+                  <h3>{okr.title}</h3>
+                  <p className="meta">Completed: {new Date(okr.completedAt).toLocaleString()}</p>
+                  <p className="meta">
+                    Date variance: {okr.expectedVsActualDays} day(s) {okr.expectedVsActualDays > 0 ? "late" : "early/on-time"}
+                  </p>
+                </article>
+              ))}
+            </div>
+          </section>
+        </>
+      ) : null}
+
+      {!isLoggedIn && errorMessage ? <p className="error-text">{errorMessage}</p> : null}
     </main>
   );
 }

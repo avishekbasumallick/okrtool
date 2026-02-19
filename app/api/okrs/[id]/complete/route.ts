@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { rowToCompletedOKR, type OkrRow } from "@/lib/okr-mappers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { requireUserId } from "@/lib/user-id";
+import { requireAuthUserId } from "@/lib/auth-user";
 
 function calculateExpectedVsActualDays(deadline: string, completedAt: string) {
   const expected = new Date(`${deadline}T00:00:00`);
@@ -12,7 +12,7 @@ function calculateExpectedVsActualDays(deadline: string, completedAt: string) {
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
-    const userId = requireUserId(request);
+    const userId = await requireAuthUserId(request);
     if (userId instanceof NextResponse) {
       return userId;
     }

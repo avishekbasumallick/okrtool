@@ -2,13 +2,13 @@ import { NextResponse } from "next/server";
 import type { Priority } from "@/lib/types";
 import { rowToActiveOKR, type OkrRow } from "@/lib/okr-mappers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { requireUserId } from "@/lib/user-id";
+import { requireAuthUserId } from "@/lib/auth-user";
 
 const PRIORITIES = new Set<Priority>(["P1", "P2", "P3", "P4", "P5"]);
 
 export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
-    const userId = requireUserId(request);
+    const userId = await requireAuthUserId(request);
     if (userId instanceof NextResponse) {
       return userId;
     }
@@ -68,7 +68,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
 
 export async function DELETE(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
-    const userId = requireUserId(request);
+    const userId = await requireAuthUserId(request);
     if (userId instanceof NextResponse) {
       return userId;
     }

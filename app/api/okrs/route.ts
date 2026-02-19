@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { rowToActiveOKR, rowToCompletedOKR, type OkrRow } from "@/lib/okr-mappers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { requireUserId } from "@/lib/user-id";
+import { requireAuthUserId } from "@/lib/auth-user";
 
 function fallbackScope(title: string) {
   return `Deliver ${title} with clear owner, measurable output, and stakeholder sign-off.`;
@@ -15,7 +15,7 @@ function fallbackDeadline() {
 
 export async function GET(request: Request) {
   try {
-    const userId = requireUserId(request);
+    const userId = await requireAuthUserId(request);
     if (userId instanceof NextResponse) {
       return userId;
     }
@@ -47,7 +47,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const userId = requireUserId(request);
+    const userId = await requireAuthUserId(request);
     if (userId instanceof NextResponse) {
       return userId;
     }
