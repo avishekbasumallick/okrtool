@@ -30,8 +30,3 @@ export type AiUpdate = {
   scope: string;
   deadline: string;
 };
-
-export type ReconcileQuestion = {
-  id: string;
-  question: string;
-};

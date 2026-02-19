@@ -55,12 +55,16 @@ export async function POST(request: Request) {
     }
 
     const body = (await request.json()) as { title?: string; notes?: string };
-    const title = body.title?.trim();
-    if (!title) {
-      return NextResponse.json({ error: "Title is required." }, { status: 400 });
+    const title = body.title?.trim() ?? "";
+    const notes = body.notes?.trim() ?? "";
+
+    if (title.length < 50) {
+      return NextResponse.json({ error: "Title must be at least 50 characters." }, { status: 400 });
     }
 
-    const notes = (body.notes ?? "").trim();
+    if (notes.length < 100) {
+      return NextResponse.json({ error: "Notes must be at least 100 characters." }, { status: 400 });
+    }
 
     let scope = fallbackScope(title);
     try {

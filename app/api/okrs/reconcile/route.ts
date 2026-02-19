@@ -12,7 +12,7 @@ export async function POST(request: Request) {
       return userId;
     }
 
-    const body = (await request.json()) as { category?: string; answers?: Record<string, string> };
+    const body = (await request.json()) as { category?: string };
     const category = body.category?.trim();
 
     if (!category) {
@@ -40,11 +40,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ updates: [] });
     }
 
-    const updates = await reconcileWithGemini(active, {
-      category,
-      answers: body.answers ?? {}
-    });
-
+    const updates = await reconcileWithGemini(active, { category });
     const updatesById = new Map(updates.map((update) => [update.id, update]));
 
     for (const row of rows) {

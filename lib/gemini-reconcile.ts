@@ -1,5 +1,5 @@
 import { BROAD_CATEGORIES } from "@/lib/categories";
-import type { ActiveOKR, AiUpdate, Priority, ReconcileQuestion } from "@/lib/types";
+import type { ActiveOKR, AiUpdate, Priority } from "@/lib/types";
 
 type GeminiResponse = {
   candidates?: Array<{
@@ -22,12 +22,9 @@ type GeminiListModelsResponse = {
 
 const PRIORITIES: Priority[] = ["P1", "P2", "P3", "P4", "P5"];
 const UNCAT = "Uncategorized";
+const DEFAULT_MODEL = "gemini-2.5-flash";
 
-const DEFAULT_PRO_MODEL = "gemini-2.5-pro";
-const DEFAULT_FLASH_MODEL = "gemini-2.5-flash";
-
-let cachedAutoProModel: string | null = null;
-let cachedAutoFlashModel: string | null = null;
+let cachedAutoModel: string | null = null;
 
 function normalizePriority(value: string): Priority {
   return PRIORITIES.includes(value as Priority) ? (value as Priority) : "P3";
@@ -92,46 +89,6 @@ function tryParseUpdateArray(raw: string): Array<Partial<AiUpdate>> | null {
   return null;
 }
 
-function tryParseQuestionArray(raw: string): ReconcileQuestion[] | null {
-  for (const parsed of parseJsonCandidates(raw)) {
-    const source = Array.isArray(parsed)
-      ? parsed
-      : parsed !== null && typeof parsed === "object" && Array.isArray((parsed as { questions?: unknown }).questions)
-        ? ((parsed as { questions: unknown[] }).questions ?? [])
-        : null;
-
-    if (!source) {
-      continue;
-    }
-
-    const questions = source
-      .map((entry, idx) => {
-        if (entry && typeof entry === "object" && "question" in (entry as Record<string, unknown>)) {
-          return {
-            id: String((entry as { id?: unknown }).id ?? `q${idx + 1}`),
-            question: String((entry as { question: unknown }).question).trim()
-          };
-        }
-
-        if (typeof entry === "string") {
-          return {
-            id: `q${idx + 1}`,
-            question: entry.trim()
-          };
-        }
-
-        return null;
-      })
-      .filter((value): value is ReconcileQuestion => value !== null && value.question.length > 0);
-
-    if (questions.length > 0) {
-      return questions.slice(0, 4);
-    }
-  }
-
-  return null;
-}
-
 function fallbackUpdate(okr: ActiveOKR): AiUpdate {
   const due = new Date();
   due.setDate(due.getDate() + 14);
@@ -145,22 +102,20 @@ function fallbackUpdate(okr: ActiveOKR): AiUpdate {
   };
 }
 
-function scoreModelName(modelName: string, preference: "pro" | "flash") {
+function scoreModelName(modelName: string) {
   const n = modelName.toLowerCase();
   let score = 0;
   if (n.includes("gemini")) score += 10;
   if (n.includes("2")) score += 6;
-  if (preference === "flash" && n.includes("flash")) score += 8;
-  if (preference === "pro" && n.includes("pro")) score += 8;
+  if (n.includes("flash")) score += 8;
   if (n.includes("lite")) score += 1;
   if (n.includes("exp")) score -= 2;
   return score;
 }
 
-async function pickGeminiModel(apiKey: string, preference: "pro" | "flash"): Promise<string> {
-  const cached = preference === "pro" ? cachedAutoProModel : cachedAutoFlashModel;
-  if (cached) {
-    return cached;
+async function pickGeminiModel(apiKey: string): Promise<string> {
+  if (cachedAutoModel) {
+    return cachedAutoModel;
   }
 
   const listResp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
@@ -181,16 +136,9 @@ async function pickGeminiModel(apiKey: string, preference: "pro" | "flash"): Pro
     throw new Error("No Gemini models available that support generateContent.");
   }
 
-  candidates.sort((a, b) => scoreModelName(b, preference) - scoreModelName(a, preference));
-  const selected = candidates[0] ?? (preference === "pro" ? DEFAULT_PRO_MODEL : DEFAULT_FLASH_MODEL);
-
-  if (preference === "pro") {
-    cachedAutoProModel = selected;
-  } else {
-    cachedAutoFlashModel = selected;
-  }
-
-  return selected;
+  candidates.sort((a, b) => scoreModelName(b) - scoreModelName(a));
+  cachedAutoModel = candidates[0] ?? null;
+  return cachedAutoModel ?? DEFAULT_MODEL;
 }
 
 function shouldRetryWithAutoModel(status: number, errorText: string) {
@@ -225,26 +173,21 @@ async function callGeminiGenerateContent(apiKey: string, model: string, prompt: 
   );
 }
 
-async function runGeminiPrompt(prompt: string, modelPreference: "pro" | "flash"): Promise<string> {
+async function runGeminiPrompt(prompt: string): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error("Missing GEMINI_API_KEY. Add it in .env.local (local) and Vercel Project Settings.");
   }
 
-  const explicitModel =
-    modelPreference === "pro"
-      ? process.env.GEMINI_MODEL_PRO?.trim()
-      : process.env.GEMINI_MODEL_FLASH?.trim();
-
-  const defaultModel = modelPreference === "pro" ? DEFAULT_PRO_MODEL : DEFAULT_FLASH_MODEL;
-  const initialModel = explicitModel || defaultModel;
+  const explicitModel = process.env.GEMINI_MODEL?.trim();
+  const initialModel = explicitModel || DEFAULT_MODEL;
 
   let response = await callGeminiGenerateContent(apiKey, initialModel, prompt);
 
   if (!response.ok && !explicitModel) {
     const errorText = await response.text();
     if (shouldRetryWithAutoModel(response.status, errorText)) {
-      const autoModel = await pickGeminiModel(apiKey, modelPreference);
+      const autoModel = await pickGeminiModel(apiKey);
       response = await callGeminiGenerateContent(apiKey, autoModel, prompt);
     } else {
       throw new Error(`Gemini API request failed: ${errorText}`);
@@ -269,7 +212,7 @@ export async function generateScopeText(title: string, notes: string): Promise<s
     `Notes: ${notes || "(none)"}`
   ].join("\n");
 
-  const text = await runGeminiPrompt(prompt, "flash");
+  const text = await runGeminiPrompt(prompt);
   const trimmed = text.trim();
   if (!trimmed) {
     return `Deliver ${title} with clear owner, measurable output, and stakeholder sign-off.`;
@@ -278,35 +221,8 @@ export async function generateScopeText(title: string, notes: string): Promise<s
   return trimmed.split("\n")[0] ?? trimmed;
 }
 
-export async function generatePriorityQuestions(okrs: ActiveOKR[], category: string): Promise<ReconcileQuestion[]> {
-  const prompt = [
-    "You are an OKR planning assistant.",
-    `Generate 2 to 4 short, relevant questions for the user about urgency and complexity for category \"${category}\".`,
-    "Questions must help determine priority and deadline only.",
-    "Return JSON array only with objects: {id, question}.",
-    `OKRs: ${JSON.stringify(okrs)}`
-  ].join("\n");
-
-  const text = await runGeminiPrompt(prompt, "flash");
-  const questions = tryParseQuestionArray(text);
-
-  if (questions && questions.length > 0) {
-    return questions;
-  }
-
-  return [
-    { id: "q1", question: "How urgent is this category this week (low/medium/high)?" },
-    { id: "q2", question: "Are tasks in this category mostly low, medium, or high complexity?" },
-    { id: "q3", question: "Are any hard external deadlines fixed for this category?" }
-  ];
-}
-
-export async function reconcileWithGemini(
-  okrs: ActiveOKR[],
-  options?: { category?: string; answers?: Record<string, string> }
-): Promise<AiUpdate[]> {
+export async function reconcileWithGemini(okrs: ActiveOKR[], options?: { category?: string }): Promise<AiUpdate[]> {
   const category = options?.category ?? "";
-  const answers = options?.answers ?? {};
 
   const prompt = [
     "You are an OKR operations assistant.",
@@ -317,15 +233,15 @@ export async function reconcileWithGemini(
     "- Use broad categories only.",
     "- If an OKR category is not 'Uncategorized', keep its category unchanged.",
     "- Only if category is 'Uncategorized', assign one broad category.",
-    "- Reprioritize and recalculate deadlines based on user answers about urgency and complexity.",
+    "- Use Title and Notes to estimate urgency/complexity.",
+    "- Reprioritize and recalculate deadlines based on inferred urgency/complexity.",
     "- Keep deadlines realistic and not in the past.",
     "- Keep same number of items as input and keep ids unchanged.",
     `Target category scope: ${category || "(none provided)"}`,
-    `User answers: ${JSON.stringify(answers)}`,
     `Input OKRs: ${JSON.stringify(okrs)}`
   ].join("\n");
 
-  const text = await runGeminiPrompt(prompt, "pro");
+  const text = await runGeminiPrompt(prompt);
 
   if (!text.trim()) {
     return okrs.map(fallbackUpdate);

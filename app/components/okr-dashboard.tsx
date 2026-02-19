@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { BROAD_CATEGORIES } from "@/lib/categories";
-import type { ActiveOKR, AiUpdate, AppState, CompletedOKR, Priority, ReconcileQuestion } from "@/lib/types";
+import type { ActiveOKR, AiUpdate, AppState, CompletedOKR, Priority } from "@/lib/types";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 
 const PRIORITY_OPTIONS: Priority[] = ["P1", "P2", "P3", "P4", "P5"];
@@ -188,7 +188,9 @@ export default function OKRDashboard() {
 
         const ensuredSession = data.session ?? (await supabase.auth.signInWithPassword({ email, password })).data.session;
         if (!ensuredSession) {
-          throw new Error("Signup succeeded. Confirm email in Supabase settings or disable email confirmation for immediate login.");
+          throw new Error(
+            "Signup succeeded. Confirm email in Supabase settings or disable email confirmation for immediate login."
+          );
         }
 
         setSession(ensuredSession);
@@ -229,9 +231,20 @@ export default function OKRDashboard() {
   const onCreateOKR = async (event: FormEvent) => {
     event.preventDefault();
     const cleanTitle = titleInput.trim();
+    const cleanNotes = notesInput.trim();
     const accessToken = session?.access_token;
 
-    if (!cleanTitle || !accessToken) {
+    if (!accessToken) {
+      return;
+    }
+
+    if (cleanTitle.length < 50) {
+      setErrorMessage("Title must be at least 50 characters.");
+      return;
+    }
+
+    if (cleanNotes.length < 100) {
+      setErrorMessage("Notes must be at least 100 characters.");
       return;
     }
 
@@ -240,7 +253,7 @@ export default function OKRDashboard() {
         method: "POST",
         body: JSON.stringify({
           title: cleanTitle,
-          notes: notesInput.trim()
+          notes: cleanNotes
         })
       });
 
@@ -402,9 +415,7 @@ export default function OKRDashboard() {
       return;
     }
 
-    const confirmed = window.confirm(
-      `Run Gemini prioritization and deadline recalculation for category \"${category}\" now?`
-    );
+    const confirmed = window.confirm(`Run Gemini prioritization for category \"${category}\" now?`);
     if (!confirmed) {
       return;
     }
@@ -413,24 +424,9 @@ export default function OKRDashboard() {
     setIsReconciling(true);
 
     try {
-      const questionPayload = await apiFetch<{ questions: ReconcileQuestion[] }>(
-        accessToken,
-        "/api/okrs/reconcile/questions",
-        {
-          method: "POST",
-          body: JSON.stringify({ category })
-        }
-      );
-
-      const answers: Record<string, string> = {};
-      for (const item of questionPayload.questions) {
-        const answer = window.prompt(item.question);
-        answers[item.id] = (answer ?? "").trim();
-      }
-
       const payload = await apiFetch<{ updates: AiUpdate[] }>(accessToken, "/api/okrs/reconcile", {
         method: "POST",
-        body: JSON.stringify({ category, answers })
+        body: JSON.stringify({ category })
       });
 
       const updatesById = new Map(payload.updates.map((update) => [update.id, update]));
@@ -471,7 +467,7 @@ export default function OKRDashboard() {
     <main className="page-shell">
       <section className="hero">
         <h1>OKR Tool</h1>
-        <p>Create work items, batch your edits, then use Gemini to prioritize and recalculate dates by category.</p>
+        <p>Create work items, batch your edits, then run prioritization by category when you are done entering tasks.</p>
       </section>
 
       {!isLoggedIn ? (
@@ -529,21 +525,24 @@ export default function OKRDashboard() {
             <h2>Create Work Item</h2>
             <form onSubmit={onCreateOKR} className="grid-form">
               <label>
-                Work item title
+                Work item title (min 50 characters)
                 <input
                   required
+                  minLength={50}
                   value={titleInput}
                   onChange={(event) => setTitleInput(event.target.value)}
-                  placeholder="Example: Improve activation funnel"
+                  placeholder="Describe the task with enough detail to infer urgency and complexity"
                 />
               </label>
 
               <label>
-                Notes (optional)
+                Notes (required, min 100 characters)
                 <textarea
+                  required
+                  minLength={100}
                   value={notesInput}
                   onChange={(event) => setNotesInput(event.target.value)}
-                  placeholder="Any details to guide scope/deadline generation"
+                  placeholder="Add constraints, stakeholders, dependencies, urgency drivers, and any target dates"
                 />
               </label>
 
