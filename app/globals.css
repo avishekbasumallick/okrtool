@@ -7,6 +7,7 @@
   --accent-strong: #153f37;
   --border: #d9d6cd;
   --danger: #b12222;
+  --danger-strong: #8e1919;
 }
 
 * {
@@ -104,6 +105,14 @@ button:hover {
 
 button.secondary {
   background: #4f4f4f;
+}
+
+button.danger {
+  background: var(--danger);
+}
+
+button.danger:hover {
+  background: var(--danger-strong);
 }
 
 button:disabled {

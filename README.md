@@ -1,11 +1,11 @@
-# OKR Tool (Gemini + Vercel-ready)
+# OKR Tool (GLM z.ai + Vercel-ready)
 
 A Next.js OKR management tool that supports:
 
 - Creating work items/tasks from UI
 - Converting them into OKRs
-- Batch AI recategorization, reprioritization, and scope/deadline refinement (Gemini)
-- Editing OKRs
+- Batch AI recategorization, reprioritization, and scope/deadline refinement (GLM via z.ai)
+- Editing and deleting active OKRs
 - Completing OKRs with expected-vs-actual date variance logging
 - Archiving completed OKRs
 
@@ -14,31 +14,32 @@ A Next.js OKR management tool that supports:
 ```bash
 npm install
 cp .env.example .env.local
-# add GEMINI_API_KEY in .env.local
+# add ZAI_API_KEY in .env.local
 npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
 
-## Gemini API setup
+## GLM (z.ai) API setup
 
 You should provide API details at these two points:
 
 1. Local development
 - File: `.env.local`
-- Required variable: `GEMINI_API_KEY`
-- Optional variable: `GEMINI_MODEL` (defaults to `gemini-1.5-flash`)
+- Required variable: `ZAI_API_KEY`
+- Optional variable: `ZAI_MODEL` (defaults to `glm-5`)
+- Optional variable: `ZAI_BASE_URL` (defaults to `https://api.z.ai/api/paas/v4`)
 
 2. Vercel deployment
 - Vercel Dashboard -> Project -> Settings -> Environment Variables
-- Add `GEMINI_API_KEY` (and optional `GEMINI_MODEL`)
+- Add `ZAI_API_KEY` (and optional `ZAI_MODEL`, `ZAI_BASE_URL`)
 - Apply to Preview (and Production if needed)
 
 ## Batch AI behavior
 
-- You can create/edit/complete multiple OKRs first.
+- You can create/edit/delete/complete multiple OKRs first.
 - The app sets a pending state and prompts before running recategorization/reprioritization.
-- Gemini is called only when you click `Run Recategorization/Reprioritization` and confirm.
+- GLM is called only when you click `Run Recategorization/Reprioritization` and confirm.
 
 ## Deploy to Vercel (Preview)
 

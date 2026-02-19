@@ -117,6 +117,26 @@ export default function OKRDashboard() {
     }));
   };
 
+  const onDeleteOKR = (okr: ActiveOKR) => {
+    const confirmed = window.confirm(`Delete \"${okr.title}\" from active OKRs?`);
+    if (!confirmed) {
+      return;
+    }
+
+    setState((prev) => {
+      const nextActive = prev.active.filter((item) => item.id !== okr.id);
+      return {
+        ...prev,
+        active: nextActive,
+        pendingAiRefresh: nextActive.length > 0
+      };
+    });
+
+    if (editingId === okr.id) {
+      setEditingId(null);
+    }
+  };
+
   const onCompleteOKR = (okr: ActiveOKR) => {
     const confirmed = window.confirm(`Mark \"${okr.title}\" as completed?`);
     if (!confirmed) {
@@ -133,7 +153,8 @@ export default function OKRDashboard() {
     setState((prev) => ({
       ...prev,
       active: prev.active.filter((item) => item.id !== okr.id),
-      archived: [archivedItem, ...prev.archived]
+      archived: [archivedItem, ...prev.archived],
+      pendingAiRefresh: prev.active.length > 1
     }));
 
     if (editingId === okr.id) {
@@ -148,7 +169,7 @@ export default function OKRDashboard() {
     }
 
     const confirmed = window.confirm(
-      "Run Gemini recategorization, reprioritization, and scope/deadline refinement now?"
+      "Run GLM recategorization, reprioritization, and scope/deadline refinement now?"
     );
     if (!confirmed) {
       return;
@@ -171,7 +192,7 @@ export default function OKRDashboard() {
       const payload = (await response.json()) as { updates?: AiUpdate[]; error?: string };
 
       if (!response.ok || !payload.updates) {
-        throw new Error(payload.error ?? "Failed to run Gemini reconcile.");
+        throw new Error(payload.error ?? "Failed to run GLM reconcile.");
       }
 
       const updatesById = new Map(payload.updates.map((update) => [update.id, update]));
@@ -197,7 +218,7 @@ export default function OKRDashboard() {
         pendingAiRefresh: false
       }));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Gemini reconcile failed.");
+      setErrorMessage(error instanceof Error ? error.message : "GLM reconcile failed.");
     } finally {
       setIsReconciling(false);
     }
@@ -207,7 +228,7 @@ export default function OKRDashboard() {
     <main className="page-shell">
       <section className="hero">
         <h1>OKR Tool</h1>
-        <p>Create work items, batch your edits, then use Gemini to recategorize and reprioritize in one pass.</p>
+        <p>Create work items, batch your edits, then use GLM (z.ai) to recategorize and reprioritize in one pass.</p>
       </section>
 
       <section className="card">
@@ -240,7 +261,7 @@ export default function OKRDashboard() {
         <div className="section-head">
           <h2>Active OKRs</h2>
           <button type="button" onClick={onRunReconcile} disabled={isReconciling}>
-            {isReconciling ? "Running Gemini..." : "Run Recategorization/Reprioritization"}
+            {isReconciling ? "Running GLM..." : "Run Recategorization/Reprioritization"}
           </button>
         </div>
 
@@ -323,6 +344,9 @@ export default function OKRDashboard() {
                   </button>
                   <button type="button" className="secondary" onClick={() => onCompleteOKR(okr)}>
                     Mark Complete
+                  </button>
+                  <button type="button" className="danger" onClick={() => onDeleteOKR(okr)}>
+                    Delete
                   </button>
                 </div>
               </article>
