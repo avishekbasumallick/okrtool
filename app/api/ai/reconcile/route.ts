@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import type { ActiveOKR, AiUpdate, Priority } from "@/lib/types";
 
-type ZaiResponse = {
-  choices?: Array<{
-    message?: {
-      content?: string;
+type GeminiResponse = {
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{
+        text?: string;
+      }>;
     };
   }>;
 };
@@ -52,20 +54,20 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "No OKRs provided." }, { status: 400 });
     }
 
-    const apiKey = process.env.ZAI_API_KEY;
-    const model = process.env.ZAI_MODEL ?? "glm-5";
-    const baseUrl = process.env.ZAI_BASE_URL ?? "https://api.z.ai/api/paas/v4";
+    const apiKey = process.env.GEMINI_API_KEY;
+    const model = process.env.GEMINI_MODEL ?? "gemini-1.5-flash";
 
     if (!apiKey) {
       return NextResponse.json(
         {
-          error: "Missing ZAI_API_KEY. Add it in .env.local (local) and Vercel Project Settings (production/preview)."
+          error: "Missing GEMINI_API_KEY. Add it in .env.local (local) and Vercel Project Settings (production/preview)."
         },
         { status: 400 }
       );
     }
 
     const prompt = [
+      "You are an OKR operations assistant.",
       "Given a set of active OKRs, return JSON array only.",
       "For each input OKR id, output: id, category, priority(P1-P5), scope, deadline(YYYY-MM-DD).",
       "Goals:",
@@ -77,37 +79,34 @@ export async function POST(request: Request) {
       `Input OKRs: ${JSON.stringify(okrs)}`
     ].join("\n");
 
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are an OKR operations assistant. Always return strict JSON array only, with no prose or markdown."
-          },
-          {
-            role: "user",
-            content: prompt
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: prompt }]
+            }
+          ],
+          generationConfig: {
+            responseMimeType: "application/json"
           }
-        ],
-        temperature: 0.2,
-        stream: false
-      })
-    });
+        })
+      }
+    );
 
     if (!response.ok) {
       const errorText = await response.text();
-      return NextResponse.json({ error: `GLM API request failed: ${errorText}` }, { status: 502 });
+      return NextResponse.json({ error: `Gemini API request failed: ${errorText}` }, { status: 502 });
     }
 
-    const data = (await response.json()) as ZaiResponse;
-    const text = data.choices?.[0]?.message?.content ?? "";
+    const data = (await response.json()) as GeminiResponse;
+    const text = data.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("\n") ?? "";
 
     if (!text.trim()) {
       return NextResponse.json({ updates: okrs.map(fallbackUpdate) });
