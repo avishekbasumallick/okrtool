@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { generateScopeText } from "@/lib/gemini-reconcile";
 import { rowToActiveOKR, rowToCompletedOKR, type OkrRow } from "@/lib/okr-mappers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { requireAuthUserId } from "@/lib/auth-user";
@@ -59,6 +60,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Title is required." }, { status: 400 });
     }
 
+    const notes = (body.notes ?? "").trim();
+
+    let scope = fallbackScope(title);
+    try {
+      scope = await generateScopeText(title, notes);
+    } catch {
+      scope = fallbackScope(title);
+    }
+
     const now = new Date().toISOString();
     const defaultCategory = BROAD_CATEGORIES[0];
     const supabase = getSupabaseAdmin();
@@ -67,8 +77,8 @@ export async function POST(request: Request) {
       .insert({
         user_id: userId,
         title,
-        notes: (body.notes ?? "").trim(),
-        scope: fallbackScope(title),
+        notes,
+        scope,
         deadline: fallbackDeadline(),
         category: defaultCategory,
         priority: "P3",

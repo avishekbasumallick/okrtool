@@ -21,10 +21,13 @@ type GeminiListModelsResponse = {
 };
 
 const PRIORITIES: Priority[] = ["P1", "P2", "P3", "P4", "P5"];
-const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
 const UNCAT = "Uncategorized";
 
-let cachedAutoModel: string | null = null;
+const DEFAULT_PRO_MODEL = "gemini-2.5-pro";
+const DEFAULT_FLASH_MODEL = "gemini-2.5-flash";
+
+let cachedAutoProModel: string | null = null;
+let cachedAutoFlashModel: string | null = null;
 
 function normalizePriority(value: string): Priority {
   return PRIORITIES.includes(value as Priority) ? (value as Priority) : "P3";
@@ -142,20 +145,22 @@ function fallbackUpdate(okr: ActiveOKR): AiUpdate {
   };
 }
 
-function scoreModelName(modelName: string) {
+function scoreModelName(modelName: string, preference: "pro" | "flash") {
   const n = modelName.toLowerCase();
   let score = 0;
   if (n.includes("gemini")) score += 10;
   if (n.includes("2")) score += 6;
-  if (n.includes("flash")) score += 5;
+  if (preference === "flash" && n.includes("flash")) score += 8;
+  if (preference === "pro" && n.includes("pro")) score += 8;
   if (n.includes("lite")) score += 1;
   if (n.includes("exp")) score -= 2;
   return score;
 }
 
-async function pickGeminiModel(apiKey: string): Promise<string> {
-  if (cachedAutoModel) {
-    return cachedAutoModel;
+async function pickGeminiModel(apiKey: string, preference: "pro" | "flash"): Promise<string> {
+  const cached = preference === "pro" ? cachedAutoProModel : cachedAutoFlashModel;
+  if (cached) {
+    return cached;
   }
 
   const listResp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
@@ -176,9 +181,16 @@ async function pickGeminiModel(apiKey: string): Promise<string> {
     throw new Error("No Gemini models available that support generateContent.");
   }
 
-  candidates.sort((a, b) => scoreModelName(b) - scoreModelName(a));
-  cachedAutoModel = candidates[0] ?? null;
-  return cachedAutoModel;
+  candidates.sort((a, b) => scoreModelName(b, preference) - scoreModelName(a, preference));
+  const selected = candidates[0] ?? (preference === "pro" ? DEFAULT_PRO_MODEL : DEFAULT_FLASH_MODEL);
+
+  if (preference === "pro") {
+    cachedAutoProModel = selected;
+  } else {
+    cachedAutoFlashModel = selected;
+  }
+
+  return selected;
 }
 
 function shouldRetryWithAutoModel(status: number, errorText: string) {
@@ -213,23 +225,26 @@ async function callGeminiGenerateContent(apiKey: string, model: string, prompt: 
   );
 }
 
-async function runGeminiPrompt(prompt: string): Promise<string> {
+async function runGeminiPrompt(prompt: string, modelPreference: "pro" | "flash"): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
-  const configuredModelRaw = process.env.GEMINI_MODEL;
-
   if (!apiKey) {
     throw new Error("Missing GEMINI_API_KEY. Add it in .env.local (local) and Vercel Project Settings.");
   }
 
-  const configuredModel = configuredModelRaw?.trim() ? configuredModelRaw.trim() : null;
-  const initialModel = configuredModel ?? DEFAULT_GEMINI_MODEL;
+  const explicitModel =
+    modelPreference === "pro"
+      ? process.env.GEMINI_MODEL_PRO?.trim()
+      : process.env.GEMINI_MODEL_FLASH?.trim();
+
+  const defaultModel = modelPreference === "pro" ? DEFAULT_PRO_MODEL : DEFAULT_FLASH_MODEL;
+  const initialModel = explicitModel || defaultModel;
 
   let response = await callGeminiGenerateContent(apiKey, initialModel, prompt);
 
-  if (!response.ok && !configuredModel) {
+  if (!response.ok && !explicitModel) {
     const errorText = await response.text();
     if (shouldRetryWithAutoModel(response.status, errorText)) {
-      const autoModel = await pickGeminiModel(apiKey);
+      const autoModel = await pickGeminiModel(apiKey, modelPreference);
       response = await callGeminiGenerateContent(apiKey, autoModel, prompt);
     } else {
       throw new Error(`Gemini API request failed: ${errorText}`);
@@ -245,6 +260,24 @@ async function runGeminiPrompt(prompt: string): Promise<string> {
   return data.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("\n") ?? "";
 }
 
+export async function generateScopeText(title: string, notes: string): Promise<string> {
+  const prompt = [
+    "You are an OKR writing assistant.",
+    "Write one concise OKR scope sentence.",
+    "Do not include bullets, numbering, or JSON.",
+    `Title: ${title}`,
+    `Notes: ${notes || "(none)"}`
+  ].join("\n");
+
+  const text = await runGeminiPrompt(prompt, "flash");
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return `Deliver ${title} with clear owner, measurable output, and stakeholder sign-off.`;
+  }
+
+  return trimmed.split("\n")[0] ?? trimmed;
+}
+
 export async function generatePriorityQuestions(okrs: ActiveOKR[], category: string): Promise<ReconcileQuestion[]> {
   const prompt = [
     "You are an OKR planning assistant.",
@@ -254,7 +287,7 @@ export async function generatePriorityQuestions(okrs: ActiveOKR[], category: str
     `OKRs: ${JSON.stringify(okrs)}`
   ].join("\n");
 
-  const text = await runGeminiPrompt(prompt);
+  const text = await runGeminiPrompt(prompt, "flash");
   const questions = tryParseQuestionArray(text);
 
   if (questions && questions.length > 0) {
@@ -292,7 +325,7 @@ export async function reconcileWithGemini(
     `Input OKRs: ${JSON.stringify(okrs)}`
   ].join("\n");
 
-  const text = await runGeminiPrompt(prompt);
+  const text = await runGeminiPrompt(prompt, "pro");
 
   if (!text.trim()) {
     return okrs.map(fallbackUpdate);

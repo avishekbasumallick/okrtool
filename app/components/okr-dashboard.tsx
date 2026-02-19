@@ -7,6 +7,7 @@ import type { ActiveOKR, AiUpdate, AppState, CompletedOKR, Priority, ReconcileQu
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 
 const PRIORITY_OPTIONS: Priority[] = ["P1", "P2", "P3", "P4", "P5"];
+const UNCAT = "Uncategorized";
 
 const EMPTY_STATE: AppState = {
   active: [],
@@ -22,15 +23,23 @@ function usernameToEmail(username: string) {
   return `${username.toLowerCase()}@okrtool.local`;
 }
 
+function normalizeCategory(value: string | null | undefined) {
+  const v = (value ?? "").trim();
+  if (!v) return UNCAT;
+  return BROAD_CATEGORIES.includes(v as (typeof BROAD_CATEGORIES)[number]) ? v : UNCAT;
+}
+
 function uniquePush(items: string[], value: string) {
-  if (items.includes(value)) {
+  const normalized = normalizeCategory(value);
+  if (items.includes(normalized)) {
     return items;
   }
-  return [...items, value];
+  return [...items, normalized];
 }
 
 function removeItem(items: string[], value: string) {
-  return items.filter((item) => item !== value);
+  const normalized = normalizeCategory(value);
+  return items.filter((item) => item !== normalized);
 }
 
 async function apiFetch<T>(accessToken: string, input: string, init?: RequestInit): Promise<T> {
@@ -60,6 +69,7 @@ export default function OKRDashboard() {
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [pendingCategories, setPendingCategories] = useState<string[]>([]);
+  const [selectedPriorityCategory, setSelectedPriorityCategory] = useState<string>(UNCAT);
 
   const [session, setSession] = useState<Session | null>(null);
   const [authMode, setAuthMode] = useState<"login" | "signup">("login");
@@ -81,6 +91,7 @@ export default function OKRDashboard() {
       pendingAiRefresh: false
     }));
     setPendingCategories([]);
+    setSelectedPriorityCategory(UNCAT);
   };
 
   useEffect(() => {
@@ -111,6 +122,7 @@ export default function OKRDashboard() {
       if (!nextSession) {
         setState(EMPTY_STATE);
         setPendingCategories([]);
+        setSelectedPriorityCategory(UNCAT);
       }
     });
 
@@ -130,6 +142,17 @@ export default function OKRDashboard() {
       return new Date(a.deadline).getTime() - new Date(b.deadline).getTime();
     });
   }, [state.active]);
+
+  useEffect(() => {
+    if (pendingCategories.length === 0) {
+      setSelectedPriorityCategory(UNCAT);
+      return;
+    }
+
+    if (!pendingCategories.includes(selectedPriorityCategory)) {
+      setSelectedPriorityCategory(pendingCategories[0] ?? UNCAT);
+    }
+  }, [pendingCategories, selectedPriorityCategory]);
 
   const onAuthenticate = async (event: FormEvent) => {
     event.preventDefault();
@@ -200,6 +223,7 @@ export default function OKRDashboard() {
     setSession(null);
     setState(EMPTY_STATE);
     setPendingCategories([]);
+    setSelectedPriorityCategory(UNCAT);
   };
 
   const onCreateOKR = async (event: FormEvent) => {
@@ -360,33 +384,26 @@ export default function OKRDashboard() {
     }
   };
 
-  const onRunReconcile = async () => {
+  const onRunPrioritization = async () => {
     const accessToken = session?.access_token;
     if (!accessToken) {
       return;
     }
 
     if (pendingCategories.length === 0) {
-      setErrorMessage("No category has pending changes for reprioritization.");
+      setErrorMessage("No category has pending changes for prioritization.");
       return;
     }
 
-    const category =
-      pendingCategories.length === 1
-        ? pendingCategories[0]
-        : window.prompt(`Pick one category to reprioritize: ${pendingCategories.join(", ")}`)?.trim();
-
-    if (!category) {
-      return;
-    }
+    const category = normalizeCategory(selectedPriorityCategory);
 
     if (!pendingCategories.includes(category)) {
-      setErrorMessage("Please select a category from pending categories only.");
+      setErrorMessage("Select a pending category before running prioritization.");
       return;
     }
 
     const confirmed = window.confirm(
-      `Run Gemini reprioritization and deadline recalculation for category \"${category}\" now?`
+      `Run Gemini prioritization and deadline recalculation for category \"${category}\" now?`
     );
     if (!confirmed) {
       return;
@@ -442,7 +459,7 @@ export default function OKRDashboard() {
       setPendingCategories((prev) => removeItem(prev, category));
       setErrorMessage(null);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Gemini reconcile failed.");
+      setErrorMessage(error instanceof Error ? error.message : "Gemini prioritization failed.");
     } finally {
       setIsReconciling(false);
     }
@@ -454,7 +471,7 @@ export default function OKRDashboard() {
     <main className="page-shell">
       <section className="hero">
         <h1>OKR Tool</h1>
-        <p>Create work items, batch your edits, then use Gemini to reprioritize and recalculate dates by category.</p>
+        <p>Create work items, batch your edits, then use Gemini to prioritize and recalculate dates by category.</p>
       </section>
 
       {!isLoggedIn ? (
@@ -537,12 +554,28 @@ export default function OKRDashboard() {
           <section className="card">
             <div className="section-head">
               <h2>Active OKRs</h2>
-              <button type="button" onClick={onRunReconcile} disabled={isReconciling || isLoading}>
-                {isReconciling ? "Running Gemini..." : "Run Reprioritization/Deadline Update"}
+              <button type="button" onClick={onRunPrioritization} disabled={isReconciling || isLoading}>
+                {isReconciling ? "Running Gemini..." : "Run Prioritization"}
               </button>
             </div>
 
             {isLoading ? <p className="muted">Loading OKRs...</p> : null}
+
+            {pendingCategories.length > 0 ? (
+              <label>
+                Category for prioritization
+                <select
+                  value={selectedPriorityCategory}
+                  onChange={(event) => setSelectedPriorityCategory(event.target.value)}
+                >
+                  {pendingCategories.map((category) => (
+                    <option key={category} value={category}>
+                      {category}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
 
             {pendingCategories.length > 0 ? (
               <p className="pending-message">Pending categories: {pendingCategories.join(", ")}</p>
@@ -598,9 +631,9 @@ export default function OKRDashboard() {
                         <label>
                           Category
                           <select
-                            value={okr.category}
+                            value={normalizeCategory(okr.category)}
                             onChange={(event) => {
-                              void onUpdateOKR(okr.id, { category: event.target.value });
+                              void onUpdateOKR(okr.id, { category: normalizeCategory(event.target.value) });
                             }}
                           >
                             {BROAD_CATEGORIES.map((category) => (
