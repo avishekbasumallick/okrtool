@@ -2,7 +2,8 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
-import type { ActiveOKR, AiUpdate, AppState, CompletedOKR, Priority } from "@/lib/types";
+import { BROAD_CATEGORIES } from "@/lib/categories";
+import type { ActiveOKR, AiUpdate, AppState, CompletedOKR, Priority, ReconcileQuestion } from "@/lib/types";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 
 const PRIORITY_OPTIONS: Priority[] = ["P1", "P2", "P3", "P4", "P5"];
@@ -19,6 +20,17 @@ function priorityWeight(priority: Priority) {
 
 function usernameToEmail(username: string) {
   return `${username.toLowerCase()}@okrtool.local`;
+}
+
+function uniquePush(items: string[], value: string) {
+  if (items.includes(value)) {
+    return items;
+  }
+  return [...items, value];
+}
+
+function removeItem(items: string[], value: string) {
+  return items.filter((item) => item !== value);
 }
 
 async function apiFetch<T>(accessToken: string, input: string, init?: RequestInit): Promise<T> {
@@ -47,6 +59,7 @@ export default function OKRDashboard() {
   const [isReconciling, setIsReconciling] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [pendingCategories, setPendingCategories] = useState<string[]>([]);
 
   const [session, setSession] = useState<Session | null>(null);
   const [authMode, setAuthMode] = useState<"login" | "signup">("login");
@@ -67,6 +80,7 @@ export default function OKRDashboard() {
       archived: payload.archived,
       pendingAiRefresh: false
     }));
+    setPendingCategories([]);
   };
 
   useEffect(() => {
@@ -96,6 +110,7 @@ export default function OKRDashboard() {
       setSession(nextSession);
       if (!nextSession) {
         setState(EMPTY_STATE);
+        setPendingCategories([]);
       }
     });
 
@@ -148,7 +163,6 @@ export default function OKRDashboard() {
           throw error;
         }
 
-        // If email confirmations are enabled, session can be null after signup.
         const ensuredSession = data.session ?? (await supabase.auth.signInWithPassword({ email, password })).data.session;
         if (!ensuredSession) {
           throw new Error("Signup succeeded. Confirm email in Supabase settings or disable email confirmation for immediate login.");
@@ -185,6 +199,7 @@ export default function OKRDashboard() {
     await supabase.auth.signOut();
     setSession(null);
     setState(EMPTY_STATE);
+    setPendingCategories([]);
   };
 
   const onCreateOKR = async (event: FormEvent) => {
@@ -210,6 +225,7 @@ export default function OKRDashboard() {
         active: [payload.okr, ...prev.active],
         pendingAiRefresh: true
       }));
+      setPendingCategories((prev) => uniquePush(prev, payload.okr.category));
 
       setTitleInput("");
       setNotesInput("");
@@ -225,6 +241,7 @@ export default function OKRDashboard() {
       return;
     }
 
+    const previousItem = state.active.find((item) => item.id === id);
     const optimisticUpdatedAt = new Date().toISOString();
 
     setState((prev) => ({
@@ -251,6 +268,16 @@ export default function OKRDashboard() {
         ...prev,
         active: prev.active.map((item) => (item.id === id ? payload.okr : item))
       }));
+
+      setPendingCategories((prev) => {
+        let next = prev;
+        if (previousItem) {
+          next = uniquePush(next, previousItem.category);
+        }
+        next = uniquePush(next, payload.okr.category);
+        return next;
+      });
+
       setErrorMessage(null);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Failed to update OKR.");
@@ -279,7 +306,7 @@ export default function OKRDashboard() {
       return {
         ...prev,
         active: nextActive,
-        pendingAiRefresh: nextActive.length > 0
+        pendingAiRefresh: true
       };
     });
 
@@ -289,6 +316,7 @@ export default function OKRDashboard() {
 
     try {
       await apiFetch<{ id: string }>(accessToken, `/api/okrs/${okr.id}`, { method: "DELETE" });
+      setPendingCategories((prev) => uniquePush(prev, okr.category));
       setErrorMessage(null);
     } catch (error) {
       setState(previous);
@@ -317,8 +345,10 @@ export default function OKRDashboard() {
         ...prev,
         active: prev.active.filter((item) => item.id !== okr.id),
         archived: [payload.okr, ...prev.archived],
-        pendingAiRefresh: prev.active.length > 1
+        pendingAiRefresh: true
       }));
+
+      setPendingCategories((prev) => uniquePush(prev, okr.category));
 
       if (editingId === okr.id) {
         setEditingId(null);
@@ -332,13 +362,31 @@ export default function OKRDashboard() {
 
   const onRunReconcile = async () => {
     const accessToken = session?.access_token;
-    if (!state.active.length || !accessToken) {
-      setErrorMessage("No active OKRs available for recategorization.");
+    if (!accessToken) {
+      return;
+    }
+
+    if (pendingCategories.length === 0) {
+      setErrorMessage("No category has pending changes for reprioritization.");
+      return;
+    }
+
+    const category =
+      pendingCategories.length === 1
+        ? pendingCategories[0]
+        : window.prompt(`Pick one category to reprioritize: ${pendingCategories.join(", ")}`)?.trim();
+
+    if (!category) {
+      return;
+    }
+
+    if (!pendingCategories.includes(category)) {
+      setErrorMessage("Please select a category from pending categories only.");
       return;
     }
 
     const confirmed = window.confirm(
-      "Run Gemini recategorization, reprioritization, and deadline recalculation now?"
+      `Run Gemini reprioritization and deadline recalculation for category \"${category}\" now?`
     );
     if (!confirmed) {
       return;
@@ -348,9 +396,24 @@ export default function OKRDashboard() {
     setIsReconciling(true);
 
     try {
+      const questionPayload = await apiFetch<{ questions: ReconcileQuestion[] }>(
+        accessToken,
+        "/api/okrs/reconcile/questions",
+        {
+          method: "POST",
+          body: JSON.stringify({ category })
+        }
+      );
+
+      const answers: Record<string, string> = {};
+      for (const item of questionPayload.questions) {
+        const answer = window.prompt(item.question);
+        answers[item.id] = (answer ?? "").trim();
+      }
+
       const payload = await apiFetch<{ updates: AiUpdate[] }>(accessToken, "/api/okrs/reconcile", {
         method: "POST",
-        body: JSON.stringify({})
+        body: JSON.stringify({ category, answers })
       });
 
       const updatesById = new Map(payload.updates.map((update) => [update.id, update]));
@@ -373,8 +436,11 @@ export default function OKRDashboard() {
             };
           })
           .sort((a, b) => priorityWeight(a.priority) - priorityWeight(b.priority)),
-        pendingAiRefresh: false
+        pendingAiRefresh: pendingCategories.length > 1
       }));
+
+      setPendingCategories((prev) => removeItem(prev, category));
+      setErrorMessage(null);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Gemini reconcile failed.");
     } finally {
@@ -388,7 +454,7 @@ export default function OKRDashboard() {
     <main className="page-shell">
       <section className="hero">
         <h1>OKR Tool</h1>
-        <p>Create work items, batch your edits, then use Gemini to recategorize, reprioritize, and recalculate dates.</p>
+        <p>Create work items, batch your edits, then use Gemini to reprioritize and recalculate dates by category.</p>
       </section>
 
       {!isLoggedIn ? (
@@ -472,16 +538,14 @@ export default function OKRDashboard() {
             <div className="section-head">
               <h2>Active OKRs</h2>
               <button type="button" onClick={onRunReconcile} disabled={isReconciling || isLoading}>
-                {isReconciling ? "Running Gemini..." : "Run Recategorization/Reprioritization"}
+                {isReconciling ? "Running Gemini..." : "Run Reprioritization/Deadline Update"}
               </button>
             </div>
 
             {isLoading ? <p className="muted">Loading OKRs...</p> : null}
 
-            {state.pendingAiRefresh ? (
-              <p className="pending-message">
-                You have pending OKR changes. Confirm recategorization/reprioritization when ready to save LLM calls.
-              </p>
+            {pendingCategories.length > 0 ? (
+              <p className="pending-message">Pending categories: {pendingCategories.join(", ")}</p>
             ) : null}
 
             {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
@@ -533,12 +597,18 @@ export default function OKRDashboard() {
 
                         <label>
                           Category
-                          <input
+                          <select
                             value={okr.category}
                             onChange={(event) => {
                               void onUpdateOKR(okr.id, { category: event.target.value });
                             }}
-                          />
+                          >
+                            {BROAD_CATEGORIES.map((category) => (
+                              <option key={category} value={category}>
+                                {category}
+                              </option>
+                            ))}
+                          </select>
                         </label>
 
                         <label>

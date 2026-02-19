@@ -3,8 +3,10 @@ import type { Priority } from "@/lib/types";
 import { rowToActiveOKR, type OkrRow } from "@/lib/okr-mappers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { requireAuthUserId } from "@/lib/auth-user";
+import { BROAD_CATEGORIES } from "@/lib/categories";
 
 const PRIORITIES = new Set<Priority>(["P1", "P2", "P3", "P4", "P5"]);
+const CATEGORIES = new Set<string>(BROAD_CATEGORIES);
 
 export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
@@ -30,8 +32,15 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     if (typeof body.title === "string") patch.title = body.title.trim();
     if (typeof body.scope === "string") patch.scope = body.scope.trim();
     if (typeof body.deadline === "string") patch.deadline = body.deadline;
-    if (typeof body.category === "string") patch.category = body.category.trim();
     if (typeof body.notes === "string") patch.notes = body.notes.trim();
+
+    if (typeof body.category === "string") {
+      if (!CATEGORIES.has(body.category)) {
+        return NextResponse.json({ error: "Invalid category value." }, { status: 400 });
+      }
+      patch.category = body.category;
+    }
+
     if (typeof body.priority === "string") {
       if (!PRIORITIES.has(body.priority)) {
         return NextResponse.json({ error: "Invalid priority value." }, { status: 400 });

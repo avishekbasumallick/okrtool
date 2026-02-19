@@ -12,12 +12,20 @@ export async function POST(request: Request) {
       return userId;
     }
 
+    const body = (await request.json()) as { category?: string; answers?: Record<string, string> };
+    const category = body.category?.trim();
+
+    if (!category) {
+      return NextResponse.json({ error: "Category is required for reconcile." }, { status: 400 });
+    }
+
     const supabase = getSupabaseAdmin();
     const { data, error } = await supabase
       .from("okrs")
       .select("*")
       .eq("user_id", userId)
       .eq("status", "active")
+      .eq("category", category)
       .order("priority", { ascending: true })
       .order("deadline", { ascending: true });
 
@@ -32,7 +40,11 @@ export async function POST(request: Request) {
       return NextResponse.json({ updates: [] });
     }
 
-    const updates = await reconcileWithGemini(active);
+    const updates = await reconcileWithGemini(active, {
+      category,
+      answers: body.answers ?? {}
+    });
+
     const updatesById = new Map(updates.map((update) => [update.id, update]));
 
     for (const row of rows) {
@@ -52,7 +64,8 @@ export async function POST(request: Request) {
         })
         .eq("id", row.id)
         .eq("user_id", userId)
-        .eq("status", "active");
+        .eq("status", "active")
+        .eq("category", category);
 
       if (updateError) {
         return NextResponse.json({ error: updateError.message }, { status: 500 });
@@ -64,6 +77,7 @@ export async function POST(request: Request) {
       .select("*")
       .eq("user_id", userId)
       .eq("status", "active")
+      .eq("category", category)
       .order("priority", { ascending: true })
       .order("deadline", { ascending: true });
 

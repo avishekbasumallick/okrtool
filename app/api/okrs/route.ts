@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { rowToActiveOKR, rowToCompletedOKR, type OkrRow } from "@/lib/okr-mappers";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { requireAuthUserId } from "@/lib/auth-user";
+import { BROAD_CATEGORIES } from "@/lib/categories";
 
 function fallbackScope(title: string) {
   return `Deliver ${title} with clear owner, measurable output, and stakeholder sign-off.`;
@@ -59,6 +60,7 @@ export async function POST(request: Request) {
     }
 
     const now = new Date().toISOString();
+    const defaultCategory = BROAD_CATEGORIES[0];
     const supabase = getSupabaseAdmin();
     const { data, error } = await supabase
       .from("okrs")
@@ -68,7 +70,7 @@ export async function POST(request: Request) {
         notes: (body.notes ?? "").trim(),
         scope: fallbackScope(title),
         deadline: fallbackDeadline(),
-        category: "Uncategorized",
+        category: defaultCategory,
         priority: "P3",
         status: "active",
         created_at: now,

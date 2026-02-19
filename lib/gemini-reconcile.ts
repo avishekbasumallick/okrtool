@@ -1,4 +1,5 @@
-import type { ActiveOKR, AiUpdate, Priority } from "@/lib/types";
+import { BROAD_CATEGORIES } from "@/lib/categories";
+import type { ActiveOKR, AiUpdate, Priority, ReconcileQuestion } from "@/lib/types";
 
 type GeminiResponse = {
   candidates?: Array<{
@@ -21,6 +22,7 @@ type GeminiListModelsResponse = {
 
 const PRIORITIES: Priority[] = ["P1", "P2", "P3", "P4", "P5"];
 const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+const UNCAT = "Uncategorized";
 
 let cachedAutoModel: string | null = null;
 
@@ -49,34 +51,78 @@ function safeJsonExtract(text: string) {
   return text;
 }
 
-function tryParseUpdateArray(raw: string): Array<Partial<AiUpdate>> | null {
+function parseJsonCandidates(raw: string): unknown[] {
   const candidates = [safeJsonExtract(raw), raw].map((value) => value.trim()).filter(Boolean);
+  const parsed: unknown[] = [];
 
   for (const candidate of candidates) {
-    const normalizedVariants = [
-      candidate,
-      candidate.replace(/,\s*([}\]])/g, "$1")
-    ];
+    const normalizedVariants = [candidate, candidate.replace(/,\s*([}\]])/g, "$1")];
 
     for (const variant of normalizedVariants) {
       try {
-        const parsed = JSON.parse(variant) as unknown;
-
-        if (Array.isArray(parsed)) {
-          return parsed as Array<Partial<AiUpdate>>;
-        }
-
-        if (
-          parsed !== null &&
-          typeof parsed === "object" &&
-          "updates" in parsed &&
-          Array.isArray((parsed as { updates?: unknown }).updates)
-        ) {
-          return (parsed as { updates: Array<Partial<AiUpdate>> }).updates;
-        }
+        parsed.push(JSON.parse(variant) as unknown);
       } catch {
         continue;
       }
+    }
+  }
+
+  return parsed;
+}
+
+function tryParseUpdateArray(raw: string): Array<Partial<AiUpdate>> | null {
+  for (const parsed of parseJsonCandidates(raw)) {
+    if (Array.isArray(parsed)) {
+      return parsed as Array<Partial<AiUpdate>>;
+    }
+
+    if (
+      parsed !== null &&
+      typeof parsed === "object" &&
+      "updates" in parsed &&
+      Array.isArray((parsed as { updates?: unknown }).updates)
+    ) {
+      return (parsed as { updates: Array<Partial<AiUpdate>> }).updates;
+    }
+  }
+
+  return null;
+}
+
+function tryParseQuestionArray(raw: string): ReconcileQuestion[] | null {
+  for (const parsed of parseJsonCandidates(raw)) {
+    const source = Array.isArray(parsed)
+      ? parsed
+      : parsed !== null && typeof parsed === "object" && Array.isArray((parsed as { questions?: unknown }).questions)
+        ? ((parsed as { questions: unknown[] }).questions ?? [])
+        : null;
+
+    if (!source) {
+      continue;
+    }
+
+    const questions = source
+      .map((entry, idx) => {
+        if (entry && typeof entry === "object" && "question" in (entry as Record<string, unknown>)) {
+          return {
+            id: String((entry as { id?: unknown }).id ?? `q${idx + 1}`),
+            question: String((entry as { question: unknown }).question).trim()
+          };
+        }
+
+        if (typeof entry === "string") {
+          return {
+            id: `q${idx + 1}`,
+            question: entry.trim()
+          };
+        }
+
+        return null;
+      })
+      .filter((value): value is ReconcileQuestion => value !== null && value.question.length > 0);
+
+    if (questions.length > 0) {
+      return questions.slice(0, 4);
     }
   }
 
@@ -167,7 +213,7 @@ async function callGeminiGenerateContent(apiKey: string, model: string, prompt: 
   );
 }
 
-export async function reconcileWithGemini(okrs: ActiveOKR[]): Promise<AiUpdate[]> {
+async function runGeminiPrompt(prompt: string): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   const configuredModelRaw = process.env.GEMINI_MODEL;
 
@@ -177,20 +223,6 @@ export async function reconcileWithGemini(okrs: ActiveOKR[]): Promise<AiUpdate[]
 
   const configuredModel = configuredModelRaw?.trim() ? configuredModelRaw.trim() : null;
   const initialModel = configuredModel ?? DEFAULT_GEMINI_MODEL;
-
-  const prompt = [
-    "You are an OKR operations assistant.",
-    "Given a set of active OKRs, return JSON array only.",
-    "For each input OKR id, output: id, category, priority(P1-P5), scope, deadline(YYYY-MM-DD).",
-    "Goals:",
-    "- Categorize each OKR into a practical business category.",
-    "- Prioritize all OKRs relative to each other.",
-    "- Refine scope to be concise and measurable.",
-    "- Recalculate each deadline if necessary, based on priority, scope size, and current date.",
-    "- Keep deadlines realistic and ensure they are not in the past.",
-    "Keep same number of items as input and keep ids unchanged.",
-    `Input OKRs: ${JSON.stringify(okrs)}`
-  ].join("\n");
 
   let response = await callGeminiGenerateContent(apiKey, initialModel, prompt);
 
@@ -210,7 +242,57 @@ export async function reconcileWithGemini(okrs: ActiveOKR[]): Promise<AiUpdate[]
   }
 
   const data = (await response.json()) as GeminiResponse;
-  const text = data.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("\n") ?? "";
+  return data.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("\n") ?? "";
+}
+
+export async function generatePriorityQuestions(okrs: ActiveOKR[], category: string): Promise<ReconcileQuestion[]> {
+  const prompt = [
+    "You are an OKR planning assistant.",
+    `Generate 2 to 4 short, relevant questions for the user about urgency and complexity for category \"${category}\".`,
+    "Questions must help determine priority and deadline only.",
+    "Return JSON array only with objects: {id, question}.",
+    `OKRs: ${JSON.stringify(okrs)}`
+  ].join("\n");
+
+  const text = await runGeminiPrompt(prompt);
+  const questions = tryParseQuestionArray(text);
+
+  if (questions && questions.length > 0) {
+    return questions;
+  }
+
+  return [
+    { id: "q1", question: "How urgent is this category this week (low/medium/high)?" },
+    { id: "q2", question: "Are tasks in this category mostly low, medium, or high complexity?" },
+    { id: "q3", question: "Are any hard external deadlines fixed for this category?" }
+  ];
+}
+
+export async function reconcileWithGemini(
+  okrs: ActiveOKR[],
+  options?: { category?: string; answers?: Record<string, string> }
+): Promise<AiUpdate[]> {
+  const category = options?.category ?? "";
+  const answers = options?.answers ?? {};
+
+  const prompt = [
+    "You are an OKR operations assistant.",
+    "Given active OKRs from a single category, return JSON array only.",
+    "For each input OKR id, output: id, category, priority(P1-P5), scope, deadline(YYYY-MM-DD).",
+    `Allowed broad categories: ${BROAD_CATEGORIES.join(", ")}.`,
+    "Rules:",
+    "- Use broad categories only.",
+    "- If an OKR category is not 'Uncategorized', keep its category unchanged.",
+    "- Only if category is 'Uncategorized', assign one broad category.",
+    "- Reprioritize and recalculate deadlines based on user answers about urgency and complexity.",
+    "- Keep deadlines realistic and not in the past.",
+    "- Keep same number of items as input and keep ids unchanged.",
+    `Target category scope: ${category || "(none provided)"}`,
+    `User answers: ${JSON.stringify(answers)}`,
+    `Input OKRs: ${JSON.stringify(okrs)}`
+  ].join("\n");
+
+  const text = await runGeminiPrompt(prompt);
 
   if (!text.trim()) {
     return okrs.map(fallbackUpdate);
@@ -229,9 +311,14 @@ export async function reconcileWithGemini(okrs: ActiveOKR[]): Promise<AiUpdate[]
       return fallbackUpdate(okr);
     }
 
+    const finalCategory =
+      okr.category && okr.category !== UNCAT
+        ? okr.category
+        : String(candidate.category ?? okr.category ?? UNCAT);
+
     return {
       id: okr.id,
-      category: String(candidate.category ?? okr.category ?? "General"),
+      category: finalCategory,
       priority: normalizePriority(String(candidate.priority ?? okr.priority ?? "P3")),
       scope: String(candidate.scope ?? okr.scope),
       deadline: String(candidate.deadline ?? okr.deadline)
