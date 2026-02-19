@@ -33,30 +33,29 @@ export async function POST(request: Request) {
     }
 
     const updates = await reconcileWithGemini(active);
+    const updatesById = new Map(updates.map((update) => [update.id, update]));
 
-    const updatesById = new Map(updates.map((u) => [u.id, u]));
-    const dbUpdates = rows
-      .map((row) => {
-        const update = updatesById.get(row.id);
-        if (!update) {
-          return null;
-        }
+    for (const row of rows) {
+      const update = updatesById.get(row.id);
+      if (!update) {
+        continue;
+      }
 
-        return {
-          id: row.id,
+      const { error: updateError } = await supabase
+        .from("okrs")
+        .update({
           category: update.category,
           priority: update.priority,
           scope: update.scope,
           deadline: update.deadline,
           updated_at: new Date().toISOString()
-        };
-      })
-      .filter((value): value is NonNullable<typeof value> => value !== null);
+        })
+        .eq("id", row.id)
+        .eq("user_id", userId)
+        .eq("status", "active");
 
-    if (dbUpdates.length > 0) {
-      const { error: upsertError } = await supabase.from("okrs").upsert(dbUpdates, { onConflict: "id" });
-      if (upsertError) {
-        return NextResponse.json({ error: upsertError.message }, { status: 500 });
+      if (updateError) {
+        return NextResponse.json({ error: updateError.message }, { status: 500 });
       }
     }
 
