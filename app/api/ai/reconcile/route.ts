@@ -11,7 +11,18 @@ type GeminiResponse = {
   }>;
 };
 
+type GeminiModel = {
+  name: string;
+  supportedGenerationMethods?: string[];
+};
+
+type GeminiListModelsResponse = {
+  models?: GeminiModel[];
+};
+
 const PRIORITIES: Priority[] = ["P1", "P2", "P3", "P4", "P5"];
+
+let cachedAutoModel: string | null = null;
 
 function normalizePriority(value: string): Priority {
   return PRIORITIES.includes(value as Priority) ? (value as Priority) : "P3";
@@ -45,6 +56,48 @@ function fallbackUpdate(okr: ActiveOKR): AiUpdate {
   };
 }
 
+function scoreModelName(modelName: string) {
+  // Prefer newer Gemini + flash tiers when available, but fall back safely.
+  const n = modelName.toLowerCase();
+  let score = 0;
+  if (n.includes("gemini")) score += 10;
+  if (n.includes("2")) score += 6;
+  if (n.includes("flash")) score += 5;
+  if (n.includes("lite")) score += 1;
+  // Penalize experimental-ish variants unless nothing else exists.
+  if (n.includes("exp")) score -= 2;
+  return score;
+}
+
+async function pickGeminiModel(apiKey: string): Promise<string> {
+  if (cachedAutoModel) {
+    return cachedAutoModel;
+  }
+
+  const listResp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+  if (!listResp.ok) {
+    const errText = await listResp.text();
+    throw new Error(`Gemini ListModels failed: ${errText}`);
+  }
+
+  const data = (await listResp.json()) as GeminiListModelsResponse;
+  const models = data.models ?? [];
+
+  const candidates = models
+    .filter((m) => (m.supportedGenerationMethods ?? []).includes("generateContent"))
+    .map((m) => m.name)
+    // Some APIs return full resource names; we want the leaf for URL construction.
+    .map((name) => (name.startsWith("models/") ? name.slice("models/".length) : name));
+
+  if (candidates.length === 0) {
+    throw new Error("No Gemini models available that support generateContent.");
+  }
+
+  candidates.sort((a, b) => scoreModelName(b) - scoreModelName(a));
+  cachedAutoModel = candidates[0] ?? null;
+  return cachedAutoModel;
+}
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as { okrs?: ActiveOKR[] };
@@ -55,7 +108,7 @@ export async function POST(request: Request) {
     }
 
     const apiKey = process.env.GEMINI_API_KEY;
-    const model = process.env.GEMINI_MODEL ?? "gemini-1.5-flash";
+    const configuredModel = process.env.GEMINI_MODEL;
 
     if (!apiKey) {
       return NextResponse.json(
@@ -65,6 +118,8 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
+
+    const model = configuredModel?.trim() ? configuredModel.trim() : await pickGeminiModel(apiKey);
 
     const prompt = [
       "You are an OKR operations assistant.",

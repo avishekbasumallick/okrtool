@@ -27,7 +27,7 @@ You should provide API details at these two points:
 1. Local development
 - File: `.env.local`
 - Required variable: `GEMINI_API_KEY`
-- Optional variable: `GEMINI_MODEL` (defaults to `gemini-1.5-flash`)
+- Optional variable: `GEMINI_MODEL` (if omitted, the server auto-selects a model that supports generateContent)
 
 2. Vercel deployment
 - Vercel Dashboard -> Project -> Settings -> Environment Variables
