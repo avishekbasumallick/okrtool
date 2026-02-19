@@ -3,7 +3,8 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { ActiveOKR, AiUpdate, AppState, CompletedOKR, Priority } from "@/lib/types";
 
-const STORAGE_KEY = "okr_tool_state_v1";
+const USER_KEY = "okr_tool_user_id_v1";
+const PRIORITY_OPTIONS: Priority[] = ["P1", "P2", "P3", "P4", "P5"];
 
 const EMPTY_STATE: AppState = {
   active: [],
@@ -11,27 +12,38 @@ const EMPTY_STATE: AppState = {
   pendingAiRefresh: false
 };
 
-const PRIORITY_OPTIONS: Priority[] = ["P1", "P2", "P3", "P4", "P5"];
-
 function priorityWeight(priority: Priority) {
   return PRIORITY_OPTIONS.indexOf(priority);
 }
 
-function fallbackScope(title: string) {
-  return `Deliver ${title} with clear owner, measurable output, and stakeholder sign-off.`;
+function getOrCreateUserId() {
+  const existing = window.localStorage.getItem(USER_KEY);
+  if (existing) {
+    return existing;
+  }
+
+  const generated = crypto.randomUUID();
+  window.localStorage.setItem(USER_KEY, generated);
+  return generated;
 }
 
-function fallbackDeadline() {
-  const due = new Date();
-  due.setDate(due.getDate() + 14);
-  return due.toISOString().split("T")[0];
-}
+async function apiFetch<T>(userId: string, input: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(input, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      "x-user-id": userId,
+      ...(init?.headers ?? {})
+    }
+  });
 
-function calculateExpectedVsActualDays(deadline: string, completedAt: string) {
-  const expected = new Date(`${deadline}T00:00:00`);
-  const actual = new Date(completedAt);
-  const ms = actual.getTime() - expected.getTime();
-  return Math.round(ms / (1000 * 60 * 60 * 24));
+  const payload = (await response.json()) as T & { error?: string };
+
+  if (!response.ok) {
+    throw new Error(payload.error ?? "Request failed.");
+  }
+
+  return payload;
 }
 
 export default function OKRDashboard() {
@@ -40,25 +52,40 @@ export default function OKRDashboard() {
   const [notesInput, setNotesInput] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isReconciling, setIsReconciling] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+
+  const loadState = async (resolvedUserId: string) => {
+    const payload = await apiFetch<{ active: ActiveOKR[]; archived: CompletedOKR[] }>(resolvedUserId, "/api/okrs", {
+      method: "GET"
+    });
+
+    setState((prev) => ({
+      ...prev,
+      active: payload.active,
+      archived: payload.archived,
+      pendingAiRefresh: false
+    }));
+  };
 
   useEffect(() => {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return;
-    }
+    const initialize = async () => {
+      const resolvedUserId = getOrCreateUserId();
+      setUserId(resolvedUserId);
 
-    try {
-      const parsed = JSON.parse(raw) as AppState;
-      setState(parsed);
-    } catch {
-      setState(EMPTY_STATE);
-    }
+      try {
+        await loadState(resolvedUserId);
+        setErrorMessage(null);
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "Failed to load OKRs.");
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    void initialize();
   }, []);
-
-  useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [state]);
 
   const activeSorted = useMemo(() => {
     return [...state.active].sort((a, b) => {
@@ -70,38 +97,43 @@ export default function OKRDashboard() {
     });
   }, [state.active]);
 
-  const onCreateOKR = (event: FormEvent) => {
+  const onCreateOKR = async (event: FormEvent) => {
     event.preventDefault();
     const cleanTitle = titleInput.trim();
-    if (!cleanTitle) {
+    if (!cleanTitle || !userId) {
       return;
     }
 
-    const now = new Date().toISOString();
-    const okr: ActiveOKR = {
-      id: crypto.randomUUID(),
-      title: cleanTitle,
-      notes: notesInput.trim(),
-      scope: fallbackScope(cleanTitle),
-      deadline: fallbackDeadline(),
-      category: "Uncategorized",
-      priority: "P3",
-      createdAt: now,
-      updatedAt: now
-    };
+    try {
+      const payload = await apiFetch<{ okr: ActiveOKR }>(userId, "/api/okrs", {
+        method: "POST",
+        body: JSON.stringify({
+          title: cleanTitle,
+          notes: notesInput.trim()
+        })
+      });
 
-    setState((prev) => ({
-      ...prev,
-      active: [okr, ...prev.active],
-      pendingAiRefresh: true
-    }));
+      setState((prev) => ({
+        ...prev,
+        active: [payload.okr, ...prev.active],
+        pendingAiRefresh: true
+      }));
 
-    setTitleInput("");
-    setNotesInput("");
-    setErrorMessage(null);
+      setTitleInput("");
+      setNotesInput("");
+      setErrorMessage(null);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to create OKR.");
+    }
   };
 
-  const onUpdateOKR = (id: string, patch: Partial<ActiveOKR>) => {
+  const onUpdateOKR = async (id: string, patch: Partial<ActiveOKR>) => {
+    if (!userId) {
+      return;
+    }
+
+    const optimisticUpdatedAt = new Date().toISOString();
+
     setState((prev) => ({
       ...prev,
       active: prev.active.map((item) =>
@@ -109,20 +141,45 @@ export default function OKRDashboard() {
           ? {
               ...item,
               ...patch,
-              updatedAt: new Date().toISOString()
+              updatedAt: optimisticUpdatedAt
             }
           : item
       ),
       pendingAiRefresh: true
     }));
+
+    try {
+      const payload = await apiFetch<{ okr: ActiveOKR }>(userId, `/api/okrs/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch)
+      });
+
+      setState((prev) => ({
+        ...prev,
+        active: prev.active.map((item) => (item.id === id ? payload.okr : item))
+      }));
+      setErrorMessage(null);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to update OKR.");
+      try {
+        await loadState(userId);
+      } catch {
+        // no-op: keep optimistic state and surface existing error
+      }
+    }
   };
 
-  const onDeleteOKR = (okr: ActiveOKR) => {
+  const onDeleteOKR = async (okr: ActiveOKR) => {
+    if (!userId) {
+      return;
+    }
+
     const confirmed = window.confirm(`Delete \"${okr.title}\" from active OKRs?`);
     if (!confirmed) {
       return;
     }
 
+    const previous = state;
     setState((prev) => {
       const nextActive = prev.active.filter((item) => item.id !== okr.id);
       return {
@@ -135,41 +192,57 @@ export default function OKRDashboard() {
     if (editingId === okr.id) {
       setEditingId(null);
     }
+
+    try {
+      await apiFetch<{ id: string }>(userId, `/api/okrs/${okr.id}`, { method: "DELETE" });
+      setErrorMessage(null);
+    } catch (error) {
+      setState(previous);
+      setErrorMessage(error instanceof Error ? error.message : "Failed to delete OKR.");
+    }
   };
 
-  const onCompleteOKR = (okr: ActiveOKR) => {
+  const onCompleteOKR = async (okr: ActiveOKR) => {
+    if (!userId) {
+      return;
+    }
+
     const confirmed = window.confirm(`Mark \"${okr.title}\" as completed?`);
     if (!confirmed) {
       return;
     }
 
-    const completedAt = new Date().toISOString();
-    const archivedItem: CompletedOKR = {
-      ...okr,
-      completedAt,
-      expectedVsActualDays: calculateExpectedVsActualDays(okr.deadline, completedAt)
-    };
+    try {
+      const payload = await apiFetch<{ okr: CompletedOKR }>(userId, `/api/okrs/${okr.id}/complete`, {
+        method: "POST",
+        body: JSON.stringify({})
+      });
 
-    setState((prev) => ({
-      ...prev,
-      active: prev.active.filter((item) => item.id !== okr.id),
-      archived: [archivedItem, ...prev.archived],
-      pendingAiRefresh: prev.active.length > 1
-    }));
+      setState((prev) => ({
+        ...prev,
+        active: prev.active.filter((item) => item.id !== okr.id),
+        archived: [payload.okr, ...prev.archived],
+        pendingAiRefresh: prev.active.length > 1
+      }));
 
-    if (editingId === okr.id) {
-      setEditingId(null);
+      if (editingId === okr.id) {
+        setEditingId(null);
+      }
+
+      setErrorMessage(null);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to complete OKR.");
     }
   };
 
   const onRunReconcile = async () => {
-    if (!state.active.length) {
+    if (!state.active.length || !userId) {
       setErrorMessage("No active OKRs available for recategorization.");
       return;
     }
 
     const confirmed = window.confirm(
-      "Run Gemini recategorization, reprioritization, and scope/deadline refinement now?"
+      "Run Gemini recategorization, reprioritization, and deadline recalculation now?"
     );
     if (!confirmed) {
       return;
@@ -179,21 +252,10 @@ export default function OKRDashboard() {
     setIsReconciling(true);
 
     try {
-      const response = await fetch("/api/ai/reconcile", {
+      const payload = await apiFetch<{ updates: AiUpdate[] }>(userId, "/api/okrs/reconcile", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          okrs: state.active
-        })
+        body: JSON.stringify({})
       });
-
-      const payload = (await response.json()) as { updates?: AiUpdate[]; error?: string };
-
-      if (!response.ok || !payload.updates) {
-        throw new Error(payload.error ?? "Failed to run Gemini reconcile.");
-      }
 
       const updatesById = new Map(payload.updates.map((update) => [update.id, update]));
 
@@ -228,7 +290,7 @@ export default function OKRDashboard() {
     <main className="page-shell">
       <section className="hero">
         <h1>OKR Tool</h1>
-        <p>Create work items, batch your edits, then use Gemini to recategorize and reprioritize in one pass.</p>
+        <p>Create work items, batch your edits, then use Gemini to recategorize, reprioritize, and recalculate dates.</p>
       </section>
 
       <section className="card">
@@ -253,17 +315,19 @@ export default function OKRDashboard() {
             />
           </label>
 
-          <button type="submit">Create OKR</button>
+          <button type="submit" disabled={!userId || isLoading}>Create OKR</button>
         </form>
       </section>
 
       <section className="card">
         <div className="section-head">
           <h2>Active OKRs</h2>
-          <button type="button" onClick={onRunReconcile} disabled={isReconciling}>
+          <button type="button" onClick={onRunReconcile} disabled={isReconciling || isLoading || !userId}>
             {isReconciling ? "Running Gemini..." : "Run Recategorization/Reprioritization"}
           </button>
         </div>
+
+        {isLoading ? <p className="muted">Loading OKRs...</p> : null}
 
         {state.pendingAiRefresh ? (
           <p className="pending-message">
@@ -273,7 +337,7 @@ export default function OKRDashboard() {
 
         {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
 
-        {!activeSorted.length ? <p className="muted">No active OKRs yet.</p> : null}
+        {!isLoading && !activeSorted.length ? <p className="muted">No active OKRs yet.</p> : null}
 
         <div className="okr-list">
           {activeSorted.map((okr) => {
@@ -301,7 +365,9 @@ export default function OKRDashboard() {
                       Scope
                       <textarea
                         value={okr.scope}
-                        onChange={(event) => onUpdateOKR(okr.id, { scope: event.target.value })}
+                        onChange={(event) => {
+                          void onUpdateOKR(okr.id, { scope: event.target.value });
+                        }}
                       />
                     </label>
 
@@ -310,7 +376,9 @@ export default function OKRDashboard() {
                       <input
                         type="date"
                         value={okr.deadline}
-                        onChange={(event) => onUpdateOKR(okr.id, { deadline: event.target.value })}
+                        onChange={(event) => {
+                          void onUpdateOKR(okr.id, { deadline: event.target.value });
+                        }}
                       />
                     </label>
 
@@ -318,7 +386,9 @@ export default function OKRDashboard() {
                       Category
                       <input
                         value={okr.category}
-                        onChange={(event) => onUpdateOKR(okr.id, { category: event.target.value })}
+                        onChange={(event) => {
+                          void onUpdateOKR(okr.id, { category: event.target.value });
+                        }}
                       />
                     </label>
 
@@ -326,7 +396,9 @@ export default function OKRDashboard() {
                       Priority
                       <select
                         value={okr.priority}
-                        onChange={(event) => onUpdateOKR(okr.id, { priority: event.target.value as Priority })}
+                        onChange={(event) => {
+                          void onUpdateOKR(okr.id, { priority: event.target.value as Priority });
+                        }}
                       >
                         {PRIORITY_OPTIONS.map((priority) => (
                           <option key={priority} value={priority}>
@@ -342,10 +414,10 @@ export default function OKRDashboard() {
                   <button type="button" onClick={() => setEditingId(isEditing ? null : okr.id)}>
                     {isEditing ? "Close Edit" : "Edit"}
                   </button>
-                  <button type="button" className="secondary" onClick={() => onCompleteOKR(okr)}>
+                  <button type="button" className="secondary" onClick={() => void onCompleteOKR(okr)}>
                     Mark Complete
                   </button>
-                  <button type="button" className="danger" onClick={() => onDeleteOKR(okr)}>
+                  <button type="button" className="danger" onClick={() => void onDeleteOKR(okr)}>
                     Delete
                   </button>
                 </div>

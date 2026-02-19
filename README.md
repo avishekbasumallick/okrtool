@@ -1,55 +1,62 @@
-# OKR Tool (Gemini + Vercel-ready)
+# OKR Tool (Gemini + Supabase + Vercel-ready)
 
 A Next.js OKR management tool that supports:
 
 - Creating work items/tasks from UI
 - Converting them into OKRs
-- Batch AI recategorization, reprioritization, and scope/deadline refinement (Gemini)
+- Batch AI recategorization, reprioritization, and deadline recalculation (Gemini)
 - Editing and deleting active OKRs
 - Completing OKRs with expected-vs-actual date variance logging
-- Archiving completed OKRs
+- Persisting OKRs per user in Supabase
 
 ## Run locally
 
 ```bash
 npm install
 cp .env.example .env.local
-# add GEMINI_API_KEY in .env.local
+# set GEMINI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY in .env.local
 npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
 
-## Gemini API setup
+## Required environment variables
 
-You should provide API details at these two points:
+- `GEMINI_API_KEY` (required)
+- `SUPABASE_URL` (required)
+- `SUPABASE_SERVICE_ROLE_KEY` (required, server-side only)
+- `GEMINI_MODEL` (optional; if omitted defaults to `gemini-2.5-flash`, then falls back to auto-select)
 
-1. Local development
-- File: `.env.local`
-- Required variable: `GEMINI_API_KEY`
-- Optional variable: `GEMINI_MODEL` (if omitted, the server defaults to `gemini-2.5-flash` (and falls back to auto-select if unavailable))
+## Supabase setup
 
-2. Vercel deployment
-- Vercel Dashboard -> Project -> Settings -> Environment Variables
-- Add `GEMINI_API_KEY` (and optional `GEMINI_MODEL`)
-- Apply to Preview (and Production if needed)
+1. Open Supabase SQL Editor.
+2. Run `db/schema.sql` from this repo.
+3. Copy your project URL and service role key.
+4. Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in local `.env.local` and Vercel project env vars.
+
+## Vercel setup
+
+In Vercel Project -> Settings -> Environment Variables, set:
+
+- `GEMINI_API_KEY`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `GEMINI_MODEL` (optional)
+
+Apply to Preview and Production as needed.
+
+## User-level persistence model
+
+The app stores a generated local user identifier in browser localStorage and sends it as `x-user-id` on each API call. All CRUD operations are persisted in Supabase by that user id.
 
 ## Batch AI behavior
 
 - You can create/edit/delete/complete multiple OKRs first.
-- The app sets a pending state and prompts before running recategorization/reprioritization.
-- Gemini is called only when you click `Run Recategorization/Reprioritization` and confirm.
+- The app prompts before recategorization/reprioritization.
+- Reconcile also recalculates deadlines when needed.
 
-## Deploy to Vercel (Preview)
+## Deploy to Vercel
 
 ```bash
 npx vercel deploy . -y
 ```
-
-If CLI is not authenticated, login first:
-
-```bash
-npx vercel login
-```
-
-Then redeploy.
