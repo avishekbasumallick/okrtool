@@ -34,13 +34,53 @@ function safeJsonExtract(text: string) {
     return fencedMatch[1];
   }
 
-  const start = text.indexOf("[");
-  const end = text.lastIndexOf("]");
-  if (start >= 0 && end > start) {
-    return text.slice(start, end + 1);
+  const arrayStart = text.indexOf("[");
+  const arrayEnd = text.lastIndexOf("]");
+  if (arrayStart >= 0 && arrayEnd > arrayStart) {
+    return text.slice(arrayStart, arrayEnd + 1);
+  }
+
+  const objectStart = text.indexOf("{");
+  const objectEnd = text.lastIndexOf("}");
+  if (objectStart >= 0 && objectEnd > objectStart) {
+    return text.slice(objectStart, objectEnd + 1);
   }
 
   return text;
+}
+
+function tryParseUpdateArray(raw: string): Array<Partial<AiUpdate>> | null {
+  const candidates = [safeJsonExtract(raw), raw].map((value) => value.trim()).filter(Boolean);
+
+  for (const candidate of candidates) {
+    const normalizedVariants = [
+      candidate,
+      candidate.replace(/,\s*([}\]])/g, "$1")
+    ];
+
+    for (const variant of normalizedVariants) {
+      try {
+        const parsed = JSON.parse(variant) as unknown;
+
+        if (Array.isArray(parsed)) {
+          return parsed as Array<Partial<AiUpdate>>;
+        }
+
+        if (
+          parsed !== null &&
+          typeof parsed === "object" &&
+          "updates" in parsed &&
+          Array.isArray((parsed as { updates?: unknown }).updates)
+        ) {
+          return (parsed as { updates: Array<Partial<AiUpdate>> }).updates;
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  return null;
 }
 
 function fallbackUpdate(okr: ActiveOKR): AiUpdate {
@@ -105,7 +145,8 @@ function shouldRetryWithAutoModel(status: number, errorText: string) {
 }
 
 async function callGeminiGenerateContent(apiKey: string, model: string, prompt: string) {
-  return fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+  return fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
     {
       method: "POST",
       headers: {
@@ -175,7 +216,11 @@ export async function reconcileWithGemini(okrs: ActiveOKR[]): Promise<AiUpdate[]
     return okrs.map(fallbackUpdate);
   }
 
-  const parsed = JSON.parse(safeJsonExtract(text)) as Array<Partial<AiUpdate>>;
+  const parsed = tryParseUpdateArray(text);
+  if (!parsed) {
+    return okrs.map(fallbackUpdate);
+  }
+
   const byId = new Map(parsed.map((entry) => [entry.id, entry]));
 
   return okrs.map((okr) => {
