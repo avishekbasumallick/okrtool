@@ -21,6 +21,7 @@ type GeminiListModelsResponse = {
 };
 
 const PRIORITIES: Priority[] = ["P1", "P2", "P3", "P4", "P5"];
+const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
 
 let cachedAutoModel: string | null = null;
 
@@ -57,14 +58,12 @@ function fallbackUpdate(okr: ActiveOKR): AiUpdate {
 }
 
 function scoreModelName(modelName: string) {
-  // Prefer newer Gemini + flash tiers when available, but fall back safely.
   const n = modelName.toLowerCase();
   let score = 0;
   if (n.includes("gemini")) score += 10;
   if (n.includes("2")) score += 6;
   if (n.includes("flash")) score += 5;
   if (n.includes("lite")) score += 1;
-  // Penalize experimental-ish variants unless nothing else exists.
   if (n.includes("exp")) score -= 2;
   return score;
 }
@@ -86,7 +85,6 @@ async function pickGeminiModel(apiKey: string): Promise<string> {
   const candidates = models
     .filter((m) => (m.supportedGenerationMethods ?? []).includes("generateContent"))
     .map((m) => m.name)
-    // Some APIs return full resource names; we want the leaf for URL construction.
     .map((name) => (name.startsWith("models/") ? name.slice("models/".length) : name));
 
   if (candidates.length === 0) {
@@ -96,6 +94,37 @@ async function pickGeminiModel(apiKey: string): Promise<string> {
   candidates.sort((a, b) => scoreModelName(b) - scoreModelName(a));
   cachedAutoModel = candidates[0] ?? null;
   return cachedAutoModel;
+}
+
+function shouldRetryWithAutoModel(status: number, errorText: string) {
+  if (status !== 404 && status !== 400) {
+    return false;
+  }
+
+  const normalized = errorText.toLowerCase();
+  return normalized.includes("not found") || normalized.includes("not supported") || normalized.includes("listmodels");
+}
+
+async function callGeminiGenerateContent(apiKey: string, model: string, prompt: string) {
+  return fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: prompt }]
+          }
+        ],
+        generationConfig: {
+          responseMimeType: "application/json"
+        }
+      })
+    }
+  );
 }
 
 export async function POST(request: Request) {
@@ -108,7 +137,7 @@ export async function POST(request: Request) {
     }
 
     const apiKey = process.env.GEMINI_API_KEY;
-    const configuredModel = process.env.GEMINI_MODEL;
+    const configuredModelRaw = process.env.GEMINI_MODEL;
 
     if (!apiKey) {
       return NextResponse.json(
@@ -119,7 +148,8 @@ export async function POST(request: Request) {
       );
     }
 
-    const model = configuredModel?.trim() ? configuredModel.trim() : await pickGeminiModel(apiKey);
+    const configuredModel = configuredModelRaw?.trim() ? configuredModelRaw.trim() : null;
+    const initialModel = configuredModel ?? DEFAULT_GEMINI_MODEL;
 
     const prompt = [
       "You are an OKR operations assistant.",
@@ -134,26 +164,17 @@ export async function POST(request: Request) {
       `Input OKRs: ${JSON.stringify(okrs)}`
     ].join("\n");
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: prompt }]
-            }
-          ],
-          generationConfig: {
-            responseMimeType: "application/json"
-          }
-        })
+    let response = await callGeminiGenerateContent(apiKey, initialModel, prompt);
+
+    if (!response.ok && !configuredModel) {
+      const errorText = await response.text();
+      if (shouldRetryWithAutoModel(response.status, errorText)) {
+        const autoModel = await pickGeminiModel(apiKey);
+        response = await callGeminiGenerateContent(apiKey, autoModel, prompt);
+      } else {
+        return NextResponse.json({ error: `Gemini API request failed: ${errorText}` }, { status: 502 });
       }
-    );
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
