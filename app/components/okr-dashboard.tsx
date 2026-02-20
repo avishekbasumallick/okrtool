@@ -320,8 +320,10 @@ export default function OKRDashboard() {
       setErrorMessage(error instanceof Error ? error.message : "Failed to update OKR.");
       try {
         await loadState(accessToken);
-      } catch {
-        // no-op
+      } catch (rollbackError) {
+        setErrorMessage(
+          `Failed to update OKR. Could not refresh data: ${rollbackError instanceof Error ? rollbackError.message : "Unknown error"}`
+        );
       }
     }
   };
@@ -431,28 +433,30 @@ export default function OKRDashboard() {
 
       const updatesById = new Map(payload.updates.map((update) => [update.id, update]));
 
-      setState((prev) => ({
-        ...prev,
-        active: prev.active
-          .map((okr) => {
-            const update = updatesById.get(okr.id);
-            if (!update) {
-              return okr;
-            }
-            return {
-              ...okr,
-              category: update.category,
-              priority: update.priority,
-              scope: update.scope,
-              deadline: update.deadline,
-              updatedAt: new Date().toISOString()
-            };
-          })
-          .sort((a, b) => priorityWeight(a.priority) - priorityWeight(b.priority)),
-        pendingAiRefresh: pendingCategories.length > 1
-      }));
-
-      setPendingCategories((prev) => removeItem(prev, category));
+      setPendingCategories((prev) => {
+        const updatedCategories = removeItem(prev, category);
+        setState((statePrev) => ({
+          ...statePrev,
+          active: statePrev.active
+            .map((okr) => {
+              const update = updatesById.get(okr.id);
+              if (!update) {
+                return okr;
+              }
+              return {
+                ...okr,
+                category: update.category,
+                priority: update.priority,
+                scope: update.scope,
+                deadline: update.deadline,
+                updatedAt: new Date().toISOString()
+              };
+            })
+            .sort((a, b) => priorityWeight(a.priority) - priorityWeight(b.priority)),
+          pendingAiRefresh: updatedCategories.length > 0
+        }));
+        return updatedCategories;
+      });
       setErrorMessage(null);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Gemini prioritization failed.");
